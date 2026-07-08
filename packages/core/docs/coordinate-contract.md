@@ -11,7 +11,7 @@ for every websam package.
 | --- | --- | --- |
 | **Source-pixel space** | pixels of the user's image/video frame (`srcW × srcH`) | ALL user-facing prompts (points, boxes), all returned mask geometry |
 | **Model-input space** | pixels of the square model input (`modelSize × modelSize`) | encoder inputs, prompt coordinates fed to the prompt encoder |
-| **Decoder-logit space** | the mask decoder's low-res logit grid (e.g. 256×256) | mask prompts (previous-mask logits fed back into the decoder) |
+| **Decoder-logit space** | the mask decoder's low-res logit grid (288×288 for the SAM3 tracker export) | mask prompts (previous-mask logits fed back into the decoder) |
 
 ## Rules
 
@@ -24,14 +24,19 @@ for every websam package.
    scales or padding from image sizes. It mirrors the Hugging Face
    `image_processing_sam3_fast` preprocessing, because the exported graphs
    are traced against exactly that preprocessing.
-3. **The mode is pinned empirically in M1-S0 — currently UNRESOLVED.**
-   `image_processing_sam3_fast` either square-stretches (anisotropic resize
-   to `modelSize × modelSize`) or letterboxes (uniform scale + centered
-   padding). Reading the reference source is not sufficient — the pin comes
-   from running the real exported graph on a golden non-square image and
-   checking which mode's prompt mapping reproduces the reference mask. Both
-   modes are implemented and tested in `src/coords.ts` (`'square-stretch'`,
-   `'letterbox'`), so pinning changes a constant, not code.
+3. **The mode is PINNED (M1-S0, 2026-07): `'square-stretch'`.**
+   `Sam3ImageProcessorFast` does an anisotropic resize to 1008×1008 with
+   `do_pad=None` (no letterbox branch exists), and
+   `Sam3TrackerProcessor._normalize_coordinates` scales x by `1008/srcW`
+   and y by `1008/srcH` independently with no offset. Pinned twice
+   independently: from the HF source at the export-era tag AND at main
+   (`tools/export/spikes/s0/FINDINGS.md`), and empirically via the
+   transformers.js golden run on a 640×427 image
+   (`tools/goldens/fixtures/golden-meta.json`: `reshaped_input_sizes`
+   `[[1008,1008]]`, `pad_size: null`). Normalization: `raw/255`, then
+   mean=std=0.5 (i.e. `raw/127.5 − 1`), RGB, bilinear+antialias. The
+   `'letterbox'` mode in `src/coords.ts` stays implemented/tested for
+   future model families (e.g. SAM1/SAM2-style exports).
 4. **Every MaskResult carries its transform.** Results embed the
    `CoordinateTransform` they were produced under (mode, scales, padding,
    sizes), so downstream consumers map mask geometry back to source pixels

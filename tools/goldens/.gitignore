@@ -1,0 +1,11 @@
+# Dependencies (this dir is intentionally OUTSIDE the pnpm workspace)
+node_modules/
+package-lock.json
+pnpm-lock.yaml
+
+# Downloaded model weights cache (transformers.js cache, ~300MB+)
+.cache/
+models/
+
+# NOTE: fixtures/ is deliberately NOT ignored — the golden PNG/RLE/meta
+# outputs are small and should be committed.

@@ -1,0 +1,58 @@
+{
+  "note": "See golden-meta-point1.json / golden-meta-point2.json for full per-prompt metadata.",
+  "model_id": "onnx-community/sam3-tracker-ONNX",
+  "model_revision": "429305c8a5b3de597243d919a07e4e6bdcd00ef7",
+  "dtype": "q4f16",
+  "device": "cpu",
+  "transformers_js_version": "4.2.0",
+  "mask_threshold": 0,
+  "prompts": [
+    {
+      "name": "point1",
+      "description": "single positive point at the center of the big orange circle",
+      "input_points": [
+        [
+          [
+            [
+              180,
+              210
+            ]
+          ]
+        ]
+      ],
+      "input_labels": [
+        [
+          [
+            1
+          ]
+        ]
+      ]
+    },
+    {
+      "name": "point2",
+      "description": "two-point prompt: positive at the center of the green rectangle, negative at the center of the big orange circle",
+      "input_points": [
+        [
+          [
+            [
+              465,
+              220
+            ],
+            [
+              180,
+              210
+            ]
+          ]
+        ]
+      ],
+      "input_labels": [
+        [
+          [
+            1,
+            0
+          ]
+        ]
+      ]
+    }
+  ]
+}

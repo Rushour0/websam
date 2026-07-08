@@ -1,0 +1,96 @@
+{
+  "generated": "2026-07-08T17:12:21.512Z",
+  "model_id": "onnx-community/sam3-tracker-ONNX",
+  "model_revision": "429305c8a5b3de597243d919a07e4e6bdcd00ef7",
+  "dtype": "q4f16",
+  "device": "cpu",
+  "transformers_js_version": "4.2.0",
+  "source_image": "scene-640x427.png",
+  "source_size": {
+    "width": 640,
+    "height": 427
+  },
+  "prompt": {
+    "description": "two-point prompt: positive at the center of the green rectangle, negative at the center of the big orange circle",
+    "input_points": [
+      [
+        [
+          [
+            465,
+            220
+          ],
+          [
+            180,
+            210
+          ]
+        ]
+      ]
+    ],
+    "input_labels": [
+      [
+        [
+          1,
+          0
+        ]
+      ]
+    ],
+    "coordinate_space": "source image pixels (processor rescales to reshaped input size)"
+  },
+  "expected_shape": {
+    "name": "rectangle",
+    "bbox": [
+      380,
+      120,
+      550,
+      320
+    ],
+    "center": [
+      465,
+      220
+    ],
+    "desc": "green rect x 380..550, y 120..320"
+  },
+  "preprocessing": {
+    "original_sizes": [
+      [
+        427,
+        640
+      ]
+    ],
+    "reshaped_input_sizes": [
+      [
+        1008,
+        1008
+      ]
+    ],
+    "pixel_values_dims": [
+      1,
+      3,
+      1008,
+      1008
+    ]
+  },
+  "mask_threshold": 0,
+  "multimask": {
+    "iou_scores": [
+      0.045257568359375,
+      0.0731201171875,
+      0.93017578125
+    ],
+    "selected_index": 2,
+    "num_candidates": 3
+  },
+  "mask_stats": {
+    "area_px": 33932,
+    "area_fraction": 0.12416569086651054,
+    "centroid_xy": [
+      464.63294235529884,
+      219.5266415183308
+    ]
+  },
+  "rle_format": "row-major scan (index = y*width + x); counts = alternating run lengths starting with a run of ZEROS; sum(counts) = width*height",
+  "files": {
+    "png": "golden-mask-point2.png",
+    "rle": "golden-mask-point2.rle.json"
+  }
+}

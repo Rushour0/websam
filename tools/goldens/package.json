@@ -1,0 +1,14 @@
+{
+  "name": "websam-goldens",
+  "private": true,
+  "type": "module",
+  "description": "Golden fixture generator for the websam M1 gate (transformers.js SAM3 tracker reference masks). Not part of the pnpm workspace.",
+  "scripts": {
+    "make-scene": "node make-scene.mjs",
+    "generate": "node generate.mjs"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "latest",
+    "sharp": "latest"
+  }
+}

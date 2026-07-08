@@ -1,0 +1,91 @@
+{
+  "generated": "2026-07-08T17:12:07.717Z",
+  "model_id": "onnx-community/sam3-tracker-ONNX",
+  "model_revision": "429305c8a5b3de597243d919a07e4e6bdcd00ef7",
+  "dtype": "q4f16",
+  "device": "cpu",
+  "transformers_js_version": "4.2.0",
+  "source_image": "scene-640x427.png",
+  "source_size": {
+    "width": 640,
+    "height": 427
+  },
+  "prompt": {
+    "description": "single positive point at the center of the big orange circle",
+    "input_points": [
+      [
+        [
+          [
+            180,
+            210
+          ]
+        ]
+      ]
+    ],
+    "input_labels": [
+      [
+        [
+          1
+        ]
+      ]
+    ],
+    "coordinate_space": "source image pixels (processor rescales to reshaped input size)"
+  },
+  "expected_shape": {
+    "name": "bigCircle",
+    "bbox": [
+      90,
+      120,
+      270,
+      300
+    ],
+    "center": [
+      180,
+      210
+    ],
+    "desc": "orange circle c=(180,210) r=90"
+  },
+  "preprocessing": {
+    "original_sizes": [
+      [
+        427,
+        640
+      ]
+    ],
+    "reshaped_input_sizes": [
+      [
+        1008,
+        1008
+      ]
+    ],
+    "pixel_values_dims": [
+      1,
+      3,
+      1008,
+      1008
+    ]
+  },
+  "mask_threshold": 0,
+  "multimask": {
+    "iou_scores": [
+      0.41455078125,
+      0.409423828125,
+      0.9580078125
+    ],
+    "selected_index": 2,
+    "num_candidates": 3
+  },
+  "mask_stats": {
+    "area_px": 25422,
+    "area_fraction": 0.09302546838407494,
+    "centroid_xy": [
+      179.53587443946188,
+      209.36212729132248
+    ]
+  },
+  "rle_format": "row-major scan (index = y*width + x); counts = alternating run lengths starting with a run of ZEROS; sum(counts) = width*height",
+  "files": {
+    "png": "golden-mask-point1.png",
+    "rle": "golden-mask-point1.rle.json"
+  }
+}
