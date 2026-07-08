@@ -36,6 +36,7 @@
   },
   "dependencies": {
     "comlink": "^4.4.2",
+    "mp4box": "^2.4.1",
     "onnxruntime-web": ">=1.27.0 <1.28.0"
   },
   "devDependencies": {

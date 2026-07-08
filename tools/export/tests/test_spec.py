@@ -32,7 +32,7 @@ class TestKvLenArithmetic:
 
     def test_edgetam_kv_len(self):
         # Perceiver-compressed: 7 memory frames x 256 latents + 64 ptr tokens.
-        assert EDGETAM_1024.kv_len == 7 * 256 + 64 == 1856
+        assert EDGETAM_1024.kv_len == 7 * 512 + 64 == 3648
 
     def test_memory_bank_constants(self):
         assert MAX_MEMORY_MAPS == MAX_COND_FRAMES + NUM_RECENT == 10

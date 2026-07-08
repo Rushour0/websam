@@ -138,7 +138,15 @@ export interface Backend {
    * ring of past-frame features; each tracked frame overwrites the oldest
    * slot with exactly this call.
    *
-   * @param src - Tensor whose shape equals one slot of `dst` (i.e. `dst.shape.slice(1)`).
+   * Slot-shape rule (M2, relaxed): `src` must have exactly
+   * `dst.shape.slice(1)`'s ELEMENT COUNT and the same dtype — the copy is a
+   * contiguous byte copy, reshape-free. Literal shape equality is NOT
+   * required: the video engine copies a whole per-object KV ring
+   * (`[S, T, D]`) into one batch slot of a `[B, S*T, D]` graph input, and
+   * requiring shape equality would force pointless reshapes on an opaque
+   * handle.
+   *
+   * @param src - Tensor with `dst.shape.slice(1)`'s element count and the same dtype as `dst`.
    * @param dst - Ring tensor; `dst.shape[0]` is the slot count.
    * @param slotIndex - Slot to overwrite, in `[0, dst.shape[0])`.
    */
@@ -150,6 +158,9 @@ export interface Backend {
    * (`float16` reads back as a `Uint16Array` of raw half bits).
    */
   readback(tensor: DeviceTensor): Promise<ArrayBufferView>;
+
+  /** Live-resource census for leak gates. Optional; browser backends implement it in M2. */
+  debugStats?(): { liveTensors: number; liveBytes: number };
 
   /** Release the device and every resource this backend still owns. */
   dispose(): Promise<void>;

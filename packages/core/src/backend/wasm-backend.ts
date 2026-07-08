@@ -1,5 +1,5 @@
 import { InvalidStateError, NotImplementedError, UnsupportedDeviceError } from '../errors.js';
-import { createOrtSession, OrtBackendSession } from '../runtime/ort-session.js';
+import { createOrtSession, type OrtBackendSession } from '../runtime/ort-session.js';
 import {
   allocCpuTensor,
   createCpuTensor,
@@ -15,7 +15,12 @@ import type {
   IOBindingPlan,
   TensorLocation,
 } from './backend.js';
-import type { OrtModule } from './webgpu-backend.js';
+import {
+  censusStats,
+  CensusOrtBackendSession,
+  checkCopyRegionArgs,
+  type OrtModule,
+} from './webgpu-backend.js';
 
 /** Result of {@link WasmBackend.probe}: pure capability facts, no ort involved. */
 export interface WasmProbeResult {
@@ -39,11 +44,11 @@ export interface WasmProbeResult {
  * onnxruntime-web's wasm execution provider. This is the universal fallback:
  * it must work on every supported browser, isolated or not.
  *
- * M1 status: probing, session creation, cpu tensor upload/alloc, readback
- * and dispose are real. {@link copyRegion} and device-located
- * {@link allocTensor} land in M2 (video memory bank) and still throw
- * {@link NotImplementedError} — on this backend everything is cpu-located
- * anyway.
+ * M2 status: everything on the Backend interface is real except streaming
+ * (`url`) graph compilation. On this backend everything is cpu-located, so
+ * {@link copyRegion} is a typed-array region copy and `'device'` allocation
+ * degrades to `'cpu'` by design; {@link debugStats} provides the leak-gate
+ * tensor census.
  */
 export class WasmBackend implements Backend {
   readonly kind = 'wasm' as const;
@@ -111,7 +116,9 @@ export class WasmBackend implements Backend {
       );
     }
     const inner = await createOrtSession(this.#ort, 'wasm', graph.bytes, { ioPlan: plan });
-    const session = new OrtBackendSession(inner, (s) => this.#sessions.delete(s));
+    const session = new CensusOrtBackendSession(inner, this.#tensors, (s) =>
+      this.#sessions.delete(s),
+    );
     this.#sessions.add(session);
     return session;
   }
@@ -125,22 +132,48 @@ export class WasmBackend implements Backend {
   }
 
   /**
-   * Allocate a zeroed `'cpu'` tensor. `'device'` allocation is the video
-   * ring's primitive and lands in M2.
+   * Allocate a zeroed tensor. On wasm everything is host memory, so
+   * `'device'` degrades to `'cpu'` by design (documented: on this backend
+   * `'device'` === `'cpu'`) — the video memory bank's rings are plain
+   * typed-array tensors here and the returned tensor reports
+   * `location: 'cpu'`.
    */
   allocTensor(shape: readonly number[], dtype: DType, location: TensorLocation): DeviceTensor {
     this.#assertInitialized('allocTensor');
-    if (location === 'device') {
-      throw new NotImplementedError("WasmBackend.allocTensor('device'), lands in M2");
-    }
+    void location; // 'device' === 'cpu' on wasm — every allocation is host memory.
     const tensor = allocCpuTensor(this.#ort, shape, dtype, (t) => this.#tensors.delete(t));
     this.#tensors.add(tensor);
     return tensor;
   }
 
-  /** @throws NotImplementedError — memory-bank primitive, lands in M2. */
-  copyRegion(_src: DeviceTensor, _dst: DeviceTensor, _slotIndex: number): void {
-    throw new NotImplementedError('WasmBackend.copyRegion, lands in M2');
+  /**
+   * The memory-bank ring primitive, real in M2: a single
+   * `TypedArray.prototype.set` of `src`'s elements into slot `slotIndex`
+   * of `dst`. dtype, slot bounds, and the byte-count-equal rule are
+   * validated per the Backend contract (`InvalidStateError` otherwise).
+   */
+  copyRegion(src: DeviceTensor, dst: DeviceTensor, slotIndex: number): void {
+    this.#assertInitialized('copyRegion');
+    const geometry = checkCopyRegionArgs('WasmBackend.copyRegion', src, dst, slotIndex);
+    if (geometry.src.location !== 'cpu' || geometry.dst.location !== 'cpu') {
+      throw new InvalidStateError(
+        'WasmBackend.copyRegion: operands must be cpu-located (everything is cpu on wasm)',
+      );
+    }
+    // Same dtype ⇒ same typed-array kind; the casts only narrow for TS —
+    // set() dispatches on the operands' real typed-array types at runtime.
+    const srcData = geometry.src.ortTensor.data as Uint8Array;
+    const dstData = geometry.dst.ortTensor.data as Uint8Array;
+    dstData.set(srcData, geometry.elementOffset);
+  }
+
+  /**
+   * Live-resource census for leak gates (M2): every non-disposed tensor
+   * this backend created — alloc, upload, and `run()` outputs. Callable in
+   * any state; after {@link dispose} it reports zeros.
+   */
+  debugStats(): { liveTensors: number; liveBytes: number } {
+    return censusStats(this.#tensors);
   }
 
   /**
@@ -161,7 +194,11 @@ export class WasmBackend implements Backend {
     this.#assertInitialized('dispose');
     this.#initialized = false;
     for (const tensor of [...this.#tensors]) {
-      tensor.dispose();
+      // run() outputs stay in the census after the caller disposes them
+      // (pruned lazily, see censusStats) — never double-dispose those.
+      if (!tensor.disposed) {
+        tensor.dispose();
+      }
     }
     this.#tensors.clear();
     for (const session of [...this.#sessions]) {

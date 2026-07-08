@@ -19,7 +19,8 @@
   ],
   "scripts": {
     "build": "tsdown",
-    "test": "vitest run"
+    "test": "vitest run --project unit",
+    "test:browser": "vitest run --project browser"
   },
   "repository": {
     "type": "git",
@@ -28,9 +29,12 @@
   },
   "homepage": "https://github.com/Rushour0/websam#readme",
   "dependencies": {
-    "@websam/core": "workspace:^"
+    "@websam/core": "workspace:^",
+    "fflate": "^0.8.3"
   },
   "devDependencies": {
+    "@vitest/browser": "^3.2.7",
+    "playwright": "^1.61.1",
     "tsdown": "^0.22.4",
     "typescript": "^5.9.3",
     "vitest": "^3.2.7"

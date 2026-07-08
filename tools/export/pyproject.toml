@@ -29,6 +29,11 @@ export = [
     "torch>=2.12.1,<3",
     "transformers>=5.13.0,<6",
     "onnxslim>=0.1.94,<0.2",
+    # EdgeTAM's vision backbone is a TimmWrapper (RepViT-M1 via timm) --
+    # required to even construct EdgeTamVideoModel from the HF checkpoint.
+    "timm>=1.0.15,<2",
+    # torch.onnx.export(dynamo=True) requires onnxscript at runtime.
+    "onnxscript>=0.2.0,<1",
 ]
 
 [dependency-groups]

@@ -1,4 +1,4 @@
-import type { RLEMask } from '@websam/core';
+import type { FramePropagationResult, RLEMask } from '@websam/core';
 
 /**
  * Construction parameters for a {@link MaskTimeline}.
@@ -225,6 +225,44 @@ export class MaskTimeline {
       height: this.height,
       objects,
     };
+  }
+
+  /**
+   * Drain a propagation stream (e.g. `session.propagate()`) into a timeline.
+   *
+   * `collect` is the stream's SINGLE consumer — the `propagate()` iterator
+   * contract allows no second one. Use `options.onFrame` to observe frames
+   * from that same consumer (the demo renders live this way). Each mask is
+   * stored as `set(String(mask.objectId), frame.frameIndex, mask.toRLE(),
+   * options.epoch)`, so a stale `options.epoch` is rejected per the
+   * {@link set} contract instead of resurrecting old masks.
+   *
+   * Errors thrown by the stream — notably `EpochInvalidatedError` after a
+   * mid-flight `refineObject` — propagate to the caller, who refines, calls
+   * {@link invalidateAfter}, and re-collects into the SAME timeline under
+   * the new epoch. To support that, `init` may be an existing
+   * {@link MaskTimeline} (it satisfies {@link MaskTimelineInit}
+   * structurally): frames are then collected into it rather than into a
+   * fresh timeline. Masks stored before the error remain stored.
+   */
+  static async collect(
+    frames: AsyncIterable<FramePropagationResult>,
+    init: MaskTimelineInit,
+    options?: {
+      /** Called after each frame is stored — lets the demo render live from the same single consumer. */
+      onFrame?: (frame: FramePropagationResult) => void;
+      /** Epoch stamped into set(); pairs with invalidateAfter for the refine flow. */
+      epoch?: number;
+    },
+  ): Promise<MaskTimeline> {
+    const timeline = init instanceof MaskTimeline ? init : new MaskTimeline(init);
+    for await (const frame of frames) {
+      for (const mask of frame.masks) {
+        timeline.set(String(mask.objectId), frame.frameIndex, mask.toRLE(), options?.epoch);
+      }
+      options?.onFrame?.(frame);
+    }
+    return timeline;
   }
 
   /** Reconstruct a timeline previously produced by {@link toJSON}. */

@@ -30,9 +30,9 @@ with an attention mask, so the graph shape is static per tier:
 
 * ``SAM3_1008``: 72x72 grid  -> ``10 * 5184 + 64 = 51904``
 * ``SAM3_560``:  40x40 grid  -> ``10 * 1600 + 64 = 16064``
-* ``EDGETAM_1024``: the perceiver resampler compresses each memory frame to
-  256 latents and keeps 7 memory frames (1 conditioning + 6 recent), so
-  ``7 * 256 + 64 = 1856``.
+* ``EDGETAM_1024``: the 2D Spatial Perceiver compresses each memory frame to
+  512 latent tokens (256 1D + 256 2D) and keeps 7 memory frames
+  (1 conditioning + 6 recent), so ``7 * 512 + 64 = 3648``.
 
 Temporal position (tpos) rule
 -----------------------------
@@ -175,7 +175,7 @@ class ExportSpec:
 
     tokens_per_memory_map: int
     """KV tokens contributed per memory map: ``grid_size**2`` for SAM3 tiers,
-    the perceiver latent count (256) for EdgeTAM."""
+    the perceiver latent count (512 = 256 1D + 256 2D) for EdgeTAM."""
 
     max_cond_frames: int
     num_recent: int
@@ -353,20 +353,28 @@ EDGETAM_1024 = ExportSpec(
     tier="EDGETAM_1024",
     image_size=1024,
     grid_size=64,
-    tokens_per_memory_map=256,              # perceiver latents per memory frame
+    tokens_per_memory_map=512,              # 256 1D latents + 256 2D latents (16x16 grid)
     max_cond_frames=1,
     num_recent=NUM_RECENT,
-    max_memory_maps=7,                      # 1 cond + 6 recent
+    max_memory_maps=7,                      # 1 cond + 6 recent (JS caps cond via closest-cond selection)
     ptr_tokens=PTR_TOKENS,
     max_object_pointers=MAX_OBJECT_POINTERS,
-    kv_len=7 * 256 + 64,                    # 1856
+    kv_len=7 * 512 + 64,                    # 3648
     streaming=True,
-    graphs=_sam3_graphs(1024, 64, 7 * 256 + 64),
+    graphs=_sam3_graphs(1024, 64, 7 * 512 + 64),
 )
-"""EdgeTAM tier: 1024px input; the 2D perceiver resampler compresses each
-64x64 memory map to 256 latent tokens, and the bank keeps 1 conditioning + 6
-recent frames -> KV length ~= 7*256 + 64 = 1856. Same tpos rule as SAM3
-(conditioning -> last slot, recent offset k -> k-1)."""
+"""EdgeTAM tier: 1024px input; the 2D Spatial Perceiver (inside the memory
+encoder stage) compresses each encoded frame to 256 1D latents (no pos-enc)
+concatenated with 256 2D latents (16x16 grid, sine pos-enc + RoPE) = 512
+tokens per memory map -> KV length = 7*512 + 64 = 3648. Same tpos rule as
+SAM3 (conditioning -> last slot, recent offset k -> k-1). Empirically pinned
+by the M2 export spike (tools/export/spikes/m2-edgetam/FINDINGS.md): the
+yonigozlan/EdgeTAM-hf checkpoint has unlimited conditioning frames
+(max_cond_frame_num=-1) — the browser engine caps at max_memory_maps via
+closest-cond selection; pointer temporal PE is DISABLED in this checkpoint
+(no pointer_time_deltas graph input); preprocessing is 1024 square-stretch
+with ImageNet mean/std (not 0.5/0.5); num_points is exported dynamic (HF's
+-10 pad tokens attend, so frozen P=8 padding would be numerically wrong)."""
 
 
 TIERS: dict[str, ExportSpec] = {
