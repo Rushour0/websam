@@ -61,3 +61,33 @@ generate.mjs` (recorded in the meta files).
 If you regenerate with a different model revision, dtype, or transformers.js
 version, the masks may shift slightly — commit the new fixtures and meta
 together, and re-run the M1 gate.
+
+## Model cache for the M1 browser gate (`fetch-models.mjs`)
+
+The browser gate (`packages/core/src/e2e/image-golden.browser.test.ts`) runs
+the REAL websam pipeline against the fixtures above, which needs the actual
+model weights served locally:
+
+```sh
+. ~/.nvm/nvm.sh && nvm use 22
+node fetch-models.mjs        # or: npm run fetch-models
+```
+
+This pulls the q4f16 community graphs at the SAME pinned revision as
+`fixtures/golden-meta.json` (sha256-verified against the Hugging Face LFS
+oids; an existing `./models` cache from `generate.mjs` is reused when its
+digests match, so nothing re-downloads), merges each graph's external
+`.onnx_data` into a single self-contained `.onnx` (websam loads one verified
+byte blob per graph), and emits schemaVersion-1 manifests into
+`models-cache/` (gitignored, ~600 MB with the raw copies, CI-cacheable):
+
+- `manifest.json` — tier `sam3-tracker` (for the demo / self-hosting via
+  `modelBaseUrl`)
+- `manifest-e2e.json` — tier `sam3-tracker-e2e` (registered by the browser
+  gate so the wasm device leg is allowed)
+
+Both manifests alias the q4f16 files under `fp32` as well, so
+`quant: 'auto'` resolves on every device (wasm prefers `int8`/`fp32`); this
+aliasing is for local test/demo manifests only. The external-data merge uses
+the `tools/export` Python venv's `onnx` package (override the interpreter
+with `WEBSAM_EXPORT_PYTHON=...`).

@@ -13,6 +13,12 @@ const crossOriginIsolationHeaders = {
 
 export default defineConfig({
   plugins: [react()],
+  // The @websam/core inference worker (imported via `?worker&url`) uses
+  // dynamic import (onnxruntime-web), which the default iife worker build
+  // cannot code-split — module workers require the es format.
+  worker: {
+    format: 'es',
+  },
   server: {
     headers: crossOriginIsolationHeaders,
   },

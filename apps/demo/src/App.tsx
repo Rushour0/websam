@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { WasmBackend, WebGpuBackend, listModels } from '@websam/core';
+import { ImageTab } from './ImageTab';
 
 /**
  * A backend probe or model-registry entry rendered generically. The demo
@@ -137,13 +138,13 @@ function ModelCard({ model }: { model: Report }) {
 }
 
 /**
- * Capability-probe status page for the future rotobrush demo. On mount it
- * runs `WebGpuBackend.probe()` and `WasmBackend.probe()` from `@websam/core`
- * and renders both capability reports, the browser environment facts that
- * gate multithreaded WASM (crossOriginIsolated), the recommended device, and
- * the registered model tiers from `listModels()` with license badges.
+ * Capability-probe panel. On mount it runs `WebGpuBackend.probe()` and
+ * `WasmBackend.probe()` from `@websam/core` and renders both capability
+ * reports, the browser environment facts that gate multithreaded WASM
+ * (crossOriginIsolated), the recommended device, and the registered model
+ * tiers from `listModels()` with license badges.
  */
-export function App() {
+function CapabilityTab() {
   const [webgpu, setWebgpu] = useState<ProbeState>({ status: 'probing' });
   const [wasm, setWasm] = useState<ProbeState>({ status: 'probing' });
   const [models, setModels] = useState<Report[] | null>(null);
@@ -183,17 +184,7 @@ export function App() {
   const isolated = typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated;
 
   return (
-    <main className="page">
-      <header className="page-header">
-        <h1>
-          websam rotobrush <span className="tag">pre-alpha</span>
-        </h1>
-        <p className="muted">
-          SAM-family interactive video segmentation in the browser. Nothing to brush yet — this page
-          reports what your browser can run.
-        </p>
-      </header>
-
+    <>
       <section className="card">
         <header className="card-header">
           <h2>environment</h2>
@@ -231,6 +222,54 @@ export function App() {
             <ModelCard model={model} key={findString(model, /^(id|modelId|name)$/) ?? index} />
           ))}
       </section>
+    </>
+  );
+}
+
+/** Top-level demo tabs. */
+type TabId = 'image' | 'capabilities';
+
+const TABS: { id: TabId; label: string }[] = [
+  { id: 'image', label: 'image' },
+  { id: 'capabilities', label: 'capabilities' },
+];
+
+/**
+ * Demo shell: shared header/footer plus a tab switch between the interactive
+ * image-segmentation tab ({@link ImageTab}) and the capability-probe panel
+ * ({@link CapabilityTab}).
+ */
+export function App() {
+  const [tab, setTab] = useState<TabId>('image');
+
+  return (
+    <main className={tab === 'image' ? 'page page-wide' : 'page'}>
+      <header className="page-header">
+        <h1>
+          websam rotobrush <span className="tag">pre-alpha</span>
+        </h1>
+        <p className="muted">
+          SAM-family interactive segmentation in the browser. Drop an image, load the model, and
+          click to segment — the capabilities tab reports what your browser can run.
+        </p>
+      </header>
+
+      <nav className="tabs" role="tablist" aria-label="demo sections">
+        {TABS.map(({ id, label }) => (
+          <button
+            key={id}
+            type="button"
+            role="tab"
+            aria-selected={tab === id}
+            className={tab === id ? 'tab-button tab-button-active' : 'tab-button'}
+            onClick={() => setTab(id)}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      {tab === 'image' ? <ImageTab /> : <CapabilityTab />}
 
       <footer className="page-footer muted">
         <p>

@@ -2,9 +2,10 @@
  * @websam/core — SAM-family interactive image & video segmentation in the
  * browser (WebGPU-first, WASM fallback).
  *
- * M0 surface: contracts, errors, coordinate math, RLE, model registry, and
- * backend capability probing are real; heavy runtime entry points throw
- * {@link NotImplementedError} until their milestone lands.
+ * M1 surface: the interactive image path is real — {@link createSegmenter}
+ * loads a model into a module worker and {@link ImageSession} runs
+ * encode-once / decode-per-click inference. Video sessions land in M2 and
+ * still reject with `NotImplementedError`.
  */
 
 export {
@@ -72,7 +73,7 @@ export type {
   ResolvedModelInfo,
 } from './segmenter.js';
 
-import { NotImplementedError } from './errors.js';
+import { createSegmenterImpl } from './sessions/segmenter-impl.js';
 import type { Segmenter } from './segmenter.js';
 
 /** Phases of model load, in the order they normally occur. */
@@ -121,16 +122,37 @@ export interface SegmenterConfig {
   acceptLicense?: 'sam';
   /** Progress callback for the load pipeline. */
   onProgress?: (event: LoadProgressEvent) => void;
+  /**
+   * Override the worker script URL (bundler escape hatch). By default the
+   * worker is spawned from the `worker.js` sibling of the library bundle via
+   * `new URL('./worker.js', import.meta.url)`; bundlers that break that
+   * relative resolution can point this at wherever they serve
+   * `@websam/core/worker`.
+   */
+  workerUrl?: string | URL;
+  /**
+   * Forwarded to onnxruntime-web `env.wasm.wasmPaths` inside the worker: the
+   * base URL its `.wasm`/`.mjs` assets are served from. Defaults to ort's own
+   * `import.meta.url` resolution.
+   */
+  wasmPaths?: string;
 }
 
 /**
- * Create a segmenter: loads the model, picks device/quant, and returns the
- * interactive image/video segmentation API.
+ * Create a segmenter: validates the config, resolves device and quantization
+ * from main-thread capability probes, spawns the inference module worker,
+ * loads + compiles the model inside it (progress via
+ * {@link SegmenterConfig.onProgress}), and returns the interactive
+ * image/video segmentation API.
  *
- * @throws NotImplementedError — createSegmenter lands in M1. The config,
- * progress, and {@link Segmenter} types are the stable contract it will
- * implement; the returned promise rejects (never throws synchronously).
+ * The returned promise rejects (never throws synchronously) with:
+ * - `InvalidStateError` — unknown model id, invalid config values, or a
+ *   license-gated model without `acceptLicense: 'sam'`.
+ * - `UnsupportedDeviceError` — no usable execution device, or the resolved
+ *   device is not in the model tier's support matrix.
+ * - `WeightVerifyError` / other load failures — propagated from the worker
+ *   with their `code` intact; the worker is terminated before rejecting.
  */
-export async function createSegmenter(_config: SegmenterConfig = {}): Promise<Segmenter> {
-  throw new NotImplementedError('createSegmenter, lands in M1');
+export async function createSegmenter(config: SegmenterConfig = {}): Promise<Segmenter> {
+  return createSegmenterImpl(config);
 }

@@ -4,7 +4,9 @@
   "description": "SAM-family interactive image & video segmentation in the browser (WebGPU-first, WASM fallback)",
   "type": "module",
   "license": "MIT",
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/worker.js"
+  ],
   "engines": {
     "node": ">=20"
   },
@@ -15,6 +17,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "default": "./dist/worker.js"
     }
   },
   "repository": {

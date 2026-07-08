@@ -7,5 +7,9 @@ pnpm-lock.yaml
 .cache/
 models/
 
+# fetch-models.mjs cache: raw + merged ONNX graphs and the emitted manifests
+# for the M1 browser gate (~600MB, CI-cacheable)
+models-cache/
+
 # NOTE: fixtures/ is deliberately NOT ignored — the golden PNG/RLE/meta
 # outputs are small and should be committed.

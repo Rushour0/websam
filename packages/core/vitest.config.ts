@@ -1,4 +1,10 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
+
+// Repo root: the browser project serves files from tools/goldens/** (golden
+// fixtures + the fetch-models.mjs model cache) via /@fs/ URLs, which Vite
+// only allows for paths inside server.fs.allow.
+const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 
 export default defineConfig({
   test: {
@@ -16,6 +22,14 @@ export default defineConfig({
         // pre-bundling would break those relative lookups.
         optimizeDeps: {
           exclude: ['onnxruntime-web'],
+        },
+        server: {
+          fs: {
+            // The e2e golden gate (src/e2e/*.browser.test.ts) fetches the
+            // committed fixtures and the gitignored model cache from
+            // tools/goldens/ — out of the package root, inside the repo.
+            allow: [repoRoot],
+          },
         },
         test: {
           name: 'browser',

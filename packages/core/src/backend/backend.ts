@@ -122,6 +122,16 @@ export interface Backend {
   allocTensor(shape: readonly number[], dtype: DType, location: TensorLocation): DeviceTensor;
 
   /**
+   * Create a tensor initialized from host data (`'cpu'` location; sessions
+   * bind it to the device at run time). `data` must be the matching typed
+   * array for `dtype` — `int64` takes a `BigInt64Array`, `float16` raw half
+   * bits in a `Uint16Array`, `bool` 0/1 bytes in a `Uint8Array` — with
+   * exactly shape-product elements. This is how the image path feeds pixels
+   * and prompt points, and how the video loop will feed each frame.
+   */
+  uploadTensor(data: ArrayBufferView, shape: readonly number[], dtype: DType): DeviceTensor;
+
+  /**
    * THE memory-bank ring primitive: copy `src` into slot `slotIndex` of the
    * ring buffer tensor `dst` (whose leading dimension is the slot axis),
    * entirely on-device — no CPU round trip. The video memory bank is a fixed

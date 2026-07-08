@@ -1,4 +1,11 @@
-import { NotImplementedError, UnsupportedDeviceError } from '../errors.js';
+import { InvalidStateError, NotImplementedError, UnsupportedDeviceError } from '../errors.js';
+import { createOrtSession, OrtBackendSession } from '../runtime/ort-session.js';
+import {
+  allocCpuTensor,
+  createCpuTensor,
+  readbackTensor,
+  type OrtDeviceTensor,
+} from '../runtime/ort-tensor.js';
 import type {
   Backend,
   BackendSession,
@@ -32,9 +39,11 @@ export interface WasmProbeResult {
  * onnxruntime-web's wasm execution provider. This is the universal fallback:
  * it must work on every supported browser, isolated or not.
  *
- * M0 status: {@link WasmBackend.probe} and {@link WasmBackend.init} are
- * real; session/tensor methods land in M1 and currently throw
- * {@link NotImplementedError}.
+ * M1 status: probing, session creation, cpu tensor upload/alloc, readback
+ * and dispose are real. {@link copyRegion} and device-located
+ * {@link allocTensor} land in M2 (video memory bank) and still throw
+ * {@link NotImplementedError} — on this backend everything is cpu-located
+ * anyway.
  */
 export class WasmBackend implements Backend {
   readonly kind = 'wasm' as const;
@@ -47,6 +56,8 @@ export class WasmBackend implements Backend {
 
   readonly #ort: OrtModule;
   #initialized = false;
+  readonly #sessions = new Set<OrtBackendSession>();
+  readonly #tensors = new Set<OrtDeviceTensor>();
 
   /**
    * @param ort - The onnxruntime-web module. Injected so callers control
@@ -56,61 +67,112 @@ export class WasmBackend implements Backend {
     this.#ort = ort;
   }
 
-  /** The injected onnxruntime-web module (exposed for M1 session wiring). */
+  /** The injected onnxruntime-web module (exposed for session wiring). */
   protected get ort(): OrtModule {
     return this.#ort;
   }
 
   /**
-   * Probe the environment. Real at M0: verifies WebAssembly exists and
-   * records whether threads are available; a non-isolated page is NOT an
-   * error (single-thread fallback), so this only throws
+   * Probe the environment. Verifies WebAssembly exists and records whether
+   * threads are available; a non-isolated page is NOT an error
+   * (single-thread fallback), so this only throws
    * {@link UnsupportedDeviceError} when WebAssembly itself is missing.
    */
   async init(): Promise<void> {
     const probed = await WasmBackend.probe();
     if (!probed.wasm) {
-      throw new UnsupportedDeviceError(
-        'WebAssembly is not available in this environment',
-      );
+      throw new UnsupportedDeviceError('WebAssembly is not available in this environment');
     }
     this.features = { threads: probed.threads };
     this.#initialized = true;
   }
 
-  /** Whether {@link init} has completed successfully. */
+  /** Whether {@link init} has completed successfully (and {@link dispose} has not run since). */
   get initialized(): boolean {
     return this.#initialized;
   }
 
-  /** @throws NotImplementedError — lands in M1. */
-  createSession(_graph: GraphAsset, _plan?: IOBindingPlan): Promise<BackendSession> {
-    throw new NotImplementedError('WasmBackend.createSession, lands in M1');
-  }
-
-  /** @throws NotImplementedError — lands in M1. */
-  allocTensor(_shape: readonly number[], _dtype: DType, _location: TensorLocation): DeviceTensor {
-    throw new NotImplementedError('WasmBackend.allocTensor, lands in M1');
-  }
-
-  /** @throws NotImplementedError — lands in M1. */
-  copyRegion(_src: DeviceTensor, _dst: DeviceTensor, _slotIndex: number): void {
-    throw new NotImplementedError('WasmBackend.copyRegion, lands in M1');
-  }
-
-  /** @throws NotImplementedError — lands in M1. */
-  readback(_tensor: DeviceTensor): Promise<ArrayBufferView> {
-    throw new NotImplementedError('WasmBackend.readback, lands in M1');
-  }
-
-  /** @throws NotImplementedError — lands in M1. */
-  dispose(): Promise<void> {
-    throw new NotImplementedError('WasmBackend.dispose, lands in M1');
+  #assertInitialized(method: string): void {
+    if (!this.#initialized) {
+      throw new InvalidStateError(`WasmBackend.${method} called before init()`);
+    }
   }
 
   /**
-   * Pure capability detection — REAL at M0, needs no ort module. Degrades,
-   * never throws. `threads` requires cross-origin isolation AND
+   * Compile `graph.bytes` on the wasm execution provider. Everything is
+   * cpu-located on this backend, so any {@link IOBindingPlan} is ignored.
+   * Streaming (`url`) graphs land in M2.
+   */
+  async createSession(graph: GraphAsset, plan?: IOBindingPlan): Promise<BackendSession> {
+    this.#assertInitialized('createSession');
+    if (graph.bytes === undefined) {
+      throw new NotImplementedError(
+        `WasmBackend.createSession(url graph '${graph.name}'), lands in M2`,
+      );
+    }
+    const inner = await createOrtSession(this.#ort, 'wasm', graph.bytes, { ioPlan: plan });
+    const session = new OrtBackendSession(inner, (s) => this.#sessions.delete(s));
+    this.#sessions.add(session);
+    return session;
+  }
+
+  /** Create a tensor initialized from host data (`'cpu'` location; int64 takes BigInt64Array). */
+  uploadTensor(data: ArrayBufferView, shape: readonly number[], dtype: DType): DeviceTensor {
+    this.#assertInitialized('uploadTensor');
+    const tensor = createCpuTensor(this.#ort, data, shape, dtype, (t) => this.#tensors.delete(t));
+    this.#tensors.add(tensor);
+    return tensor;
+  }
+
+  /**
+   * Allocate a zeroed `'cpu'` tensor. `'device'` allocation is the video
+   * ring's primitive and lands in M2.
+   */
+  allocTensor(shape: readonly number[], dtype: DType, location: TensorLocation): DeviceTensor {
+    this.#assertInitialized('allocTensor');
+    if (location === 'device') {
+      throw new NotImplementedError("WasmBackend.allocTensor('device'), lands in M2");
+    }
+    const tensor = allocCpuTensor(this.#ort, shape, dtype, (t) => this.#tensors.delete(t));
+    this.#tensors.add(tensor);
+    return tensor;
+  }
+
+  /** @throws NotImplementedError — memory-bank primitive, lands in M2. */
+  copyRegion(_src: DeviceTensor, _dst: DeviceTensor, _slotIndex: number): void {
+    throw new NotImplementedError('WasmBackend.copyRegion, lands in M2');
+  }
+
+  /**
+   * Explicit device→CPU crossing. On this backend every tensor is
+   * cpu-located, so this is a view over the existing data — no copy.
+   */
+  async readback(tensor: DeviceTensor): Promise<ArrayBufferView> {
+    this.#assertInitialized('readback');
+    return readbackTensor(tensor);
+  }
+
+  /**
+   * Dispose every tensor and session this backend still tracks and reset to
+   * the uninitialized state. Further calls (including a second dispose)
+   * throw {@link InvalidStateError} until {@link init} runs again.
+   */
+  async dispose(): Promise<void> {
+    this.#assertInitialized('dispose');
+    this.#initialized = false;
+    for (const tensor of [...this.#tensors]) {
+      tensor.dispose();
+    }
+    this.#tensors.clear();
+    for (const session of [...this.#sessions]) {
+      await session.dispose();
+    }
+    this.#sessions.clear();
+  }
+
+  /**
+   * Pure capability detection — needs no ort module. Degrades, never
+   * throws. `threads` requires cross-origin isolation AND
    * `SharedArrayBuffer`; when unavailable, callers should expect the
    * single-thread fallback rather than an error.
    */
@@ -123,8 +185,7 @@ export class WasmBackend implements Backend {
     } catch {
       wasm = false;
     }
-    const threads =
-      wasm && crossOriginIsolated && typeof SharedArrayBuffer === 'function';
+    const threads = wasm && crossOriginIsolated && typeof SharedArrayBuffer === 'function';
     return { wasm, threads, crossOriginIsolated, recommendedDevice: 'wasm' };
   }
 }
