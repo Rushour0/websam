@@ -1,0 +1,38 @@
+{
+  "name": "@websam/video-editing",
+  "version": "0.1.0",
+  "description": "Mask timeline, alpha-matte export, and mask compositing for WebSAM video segmentation",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "test": "vitest run"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Rushour0/websam.git",
+    "directory": "packages/video-editing"
+  },
+  "homepage": "https://github.com/Rushour0/websam#readme",
+  "dependencies": {
+    "@websam/core": "workspace:^"
+  },
+  "devDependencies": {
+    "tsdown": "^0.22.4",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}

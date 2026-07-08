@@ -1,0 +1,42 @@
+{
+  "name": "@websam/core",
+  "version": "0.0.0",
+  "description": "SAM-family interactive image & video segmentation in the browser (WebGPU-first, WASM fallback)",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Rushour0/websam.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/Rushour0/websam",
+  "scripts": {
+    "build": "tsdown",
+    "test": "vitest run --project unit",
+    "test:browser": "vitest run --project browser"
+  },
+  "dependencies": {
+    "comlink": "^4.4.2",
+    "onnxruntime-web": ">=1.27.0 <1.28.0"
+  },
+  "devDependencies": {
+    "@vitest/browser": "^3.2.7",
+    "playwright": "^1.61.1",
+    "tsdown": "^0.22.4",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}

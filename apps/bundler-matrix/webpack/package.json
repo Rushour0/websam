@@ -1,0 +1,22 @@
+{
+  "name": "bundler-matrix-webpack",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Webpack build canary for @websam/core packaging (exports map, tree-shaking, worker/asset resolution)",
+  "scripts": {
+    "build": "webpack"
+  },
+  "dependencies": {
+    "@websam/core": "workspace:^"
+  },
+  "devDependencies": {
+    "ts-loader": "^9.6.2",
+    "typescript": "^5.9.3",
+    "webpack": "^5.108.4",
+    "webpack-cli": "^7.2.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

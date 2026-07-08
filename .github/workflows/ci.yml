@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile=false
+
+      - name: Build
+        run: pnpm build
+
+      - name: publint
+        run: pnpm -r --filter './packages/*' exec publint
+
+      - name: Are the types wrong
+        # esm-only profile: these packages are intentionally ESM-only (browser lib)
+        run: pnpm -r --filter './packages/*' exec attw --pack . --profile esm-only
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build apps (demo + bundler matrix)
+        run: pnpm -r --filter './apps/**' build
+
+  browser-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile=false
+
+      - name: Build
+        run: pnpm build
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      # xvfb is required: SwiftShader WebGPU needs a display server;
+      # plain headless Chromium exposes no WebGPU adapter.
+      - name: Browser tests (@websam/core)
+        run: xvfb-run -a pnpm --filter @websam/core test:browser

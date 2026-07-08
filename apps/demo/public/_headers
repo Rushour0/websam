@@ -1,0 +1,6 @@
+# Cloudflare Pages headers file.
+# COOP/COEP make the page crossOriginIsolated, which unlocks SharedArrayBuffer
+# for multithreaded WASM inference. Keep in sync with vite.config.ts.
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
