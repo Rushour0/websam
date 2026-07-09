@@ -39,8 +39,8 @@ jobs:
       - name: Test
         run: pnpm test
 
-      - name: Build apps (demo + bundler matrix)
-        run: pnpm -r --filter './apps/**' build
+      - name: Build apps + examples (demo, bundler matrix, quickstart)
+        run: pnpm -r --filter './apps/**' --filter './examples/**' build
 
   browser-tests:
     runs-on: ubuntu-latest

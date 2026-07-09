@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta
+      name="description"
+      content="Minimal websam quickstart: click an image to segment it, in the browser."
+    />
+    <title>websam quickstart</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main>
+      <h1>websam quickstart</h1>
+      <p class="lede">
+        Pick an image, then click on it — a positive point prompt runs through
+        <code>@websam3/core</code> entirely in your browser.
+      </p>
+
+      <div class="controls">
+        <input id="file-input" type="file" accept="image/*" />
+        <span id="status" class="status">idle</span>
+      </div>
+
+      <div id="progress" class="progress" hidden>
+        <div id="progress-bar" class="progress-bar"></div>
+        <span id="progress-label" class="progress-label"></span>
+      </div>
+
+      <div id="notice" class="notice" hidden></div>
+
+      <canvas id="canvas"></canvas>
+
+      <p class="hint">Shift-click adds a negative point.</p>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
