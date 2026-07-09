@@ -25,6 +25,7 @@ from websam_export.wrappers.edgetam import (  # noqa: E402
     IMAGE_SIZE,
     KV_LEN,
     MAX_MEMORY_MAPS,
+    MAX_OBJECT_POINTERS,
     MEM_DIM,
     PTR_TOKENS,
     TOKENS_PER_MAP,
@@ -49,49 +50,83 @@ def model():
     return m
 
 
-def pad_kv(mem_seq: torch.Tensor, pos_seq: torch.Tensor, n_maps: int, n_ptr: int,
-           fill: float = 0.0):
-    """(S,1,64) seq-first HF tensors -> frozen (1,KV_LEN,64) + bias."""
-    memory = torch.full((1, KV_LEN, MEM_DIM), fill)
-    mem_pos = torch.full((1, KV_LEN, MEM_DIM), fill)
-    bias = torch.full((1, 1, 1, KV_LEN), ATTN_BIAS_NEG)
-    spatial = n_maps * TOKENS_PER_MAP
-    memory[0, :spatial] = mem_seq[:spatial, 0]
-    mem_pos[0, :spatial] = pos_seq[:spatial, 0]
-    bias[..., :spatial] = 0.0
-    base = MAX_MEMORY_MAPS * TOKENS_PER_MAP
-    memory[0, base:base + n_ptr] = mem_seq[spatial:, 0]
-    mem_pos[0, base:base + n_ptr] = pos_seq[spatial:, 0]
-    bias[..., base:base + n_ptr] = 0.0
-    return memory, mem_pos, bias
+def build_separated_inputs(model, n_maps: int, n_ptr_vecs: int, *, fill: float = 0.0):
+    """Build the SEPARATED (JS-fed) inputs for `n_maps` valid spatial maps and
+    `n_ptr_vecs` valid pointer vectors, plus the equivalent seq-first HF
+    `memory`/`memory_pos_embed` tensors (built via the same tpos + split rule)
+    so both sides can be compared against the real `model.memory_attention`.
+    `fill` seeds the padding regions (0.0 clean / large poisoning value).
+    """
+    tpos = model.memory_temporal_positional_encoding.detach().reshape(MAX_MEMORY_MAPS, MEM_DIM)
+
+    memory_spatial = torch.full((1, MAX_MEMORY_MAPS, TOKENS_PER_MAP, MEM_DIM), fill)
+    memory_spatial_pos = torch.full((1, MAX_MEMORY_MAPS, TOKENS_PER_MAP, MEM_DIM), fill)
+    tpos_indices = torch.full((1, MAX_MEMORY_MAPS), -1, dtype=torch.int64)
+    for s in range(n_maps):
+        memory_spatial[0, s] = torch.randn(TOKENS_PER_MAP, MEM_DIM)
+        memory_spatial_pos[0, s] = torch.randn(TOKENS_PER_MAP, MEM_DIM)
+        row = s % MAX_MEMORY_MAPS  # arbitrary valid rows, exercises the gather
+        tpos_indices[0, s] = row
+
+    object_pointers = torch.full((1, MAX_OBJECT_POINTERS, 256), fill)
+    for p in range(n_ptr_vecs):
+        object_pointers[0, p] = torch.randn(256)
+
+    memory_mask = torch.zeros(1, KV_LEN, dtype=torch.bool)
+    memory_mask[0, : n_maps * TOKENS_PER_MAP] = True
+    ptr_base = MAX_MEMORY_MAPS * TOKENS_PER_MAP
+    memory_mask[0, ptr_base : ptr_base + n_ptr_vecs * 4] = True
+
+    pointer_deltas = torch.zeros(1, MAX_OBJECT_POINTERS, dtype=torch.int64)
+    pointer_mask = torch.zeros(1, MAX_OBJECT_POINTERS, dtype=torch.bool)
+    pointer_mask[0, :n_ptr_vecs] = True
+
+    # --- equivalent seq-first HF tensors (ground truth path) ---
+    n_ptr_tok = n_ptr_vecs * 4
+    seq = n_maps * TOKENS_PER_MAP + n_ptr_tok
+    mem_seq = torch.zeros(seq, 1, MEM_DIM)
+    mem_pos_seq = torch.zeros(seq, 1, MEM_DIM)
+    for s in range(n_maps):
+        row = s % MAX_MEMORY_MAPS
+        lo, hi = s * TOKENS_PER_MAP, (s + 1) * TOKENS_PER_MAP
+        mem_seq[lo:hi, 0] = memory_spatial[0, s]
+        mem_pos_seq[lo:hi, 0] = memory_spatial_pos[0, s] + tpos[row]
+    for p in range(n_ptr_vecs):
+        lo, hi = n_maps * TOKENS_PER_MAP + p * 4, n_maps * TOKENS_PER_MAP + (p + 1) * 4
+        mem_seq[lo:hi, 0] = object_pointers[0, p].reshape(4, MEM_DIM)
+        # mem_pos_seq stays zero for pointer tokens (temporal PE disabled).
+
+    separated = (memory_spatial, memory_spatial_pos, tpos_indices, memory_mask,
+                 object_pointers, pointer_deltas, pointer_mask)
+    return separated, mem_seq, mem_pos_seq, n_maps, n_ptr_tok
 
 
 @torch.no_grad()
 def test_memory_attention_wrapper_matches_hf(model):
     torch.manual_seed(1)
-    n_maps, n_ptr = 3, 8  # 3 real memory maps, 2 pointers x 4 splits
-    seq = n_maps * TOKENS_PER_MAP + n_ptr
+    n_maps, n_ptr_vecs = 3, 2  # 3 real memory maps, 2 pointer vectors (8 tokens)
     feats_seq = torch.randn(GRID * GRID, 1, HIDDEN)
     pos_seq = torch.randn(GRID * GRID, 1, HIDDEN)
-    mem_seq = torch.randn(seq, 1, MEM_DIM)
-    mem_pos_seq = torch.randn(seq, 1, MEM_DIM)
+
+    separated, mem_seq, mem_pos_seq, n_maps, n_ptr_tok = build_separated_inputs(
+        model, n_maps, n_ptr_vecs
+    )
 
     hf_out = model.memory_attention(
         current_vision_features=feats_seq,
         current_vision_position_embeddings=pos_seq,
         memory=mem_seq,
         memory_posision_embeddings=mem_pos_seq,
-        num_object_pointer_tokens=n_ptr,
+        num_object_pointer_tokens=n_ptr_tok,
         num_spatial_memory_tokens=n_maps,
     )
     hf_bchw = hf_out.squeeze(1).transpose(1, 2).reshape(1, HIDDEN, GRID, GRID)
 
     w = EdgeTamMemoryAttentionWrapper(model).eval()
-    memory, mem_pos, bias = pad_kv(mem_seq, mem_pos_seq, n_maps, n_ptr)
     got = w(
         feats_seq[:, 0].T.reshape(1, HIDDEN, GRID, GRID).contiguous(),
         pos_seq[:, 0].T.reshape(1, HIDDEN, GRID, GRID).contiguous(),
-        memory, mem_pos, bias,
+        *separated,
     )
     assert torch.allclose(got, hf_bchw, atol=1e-5), (got - hf_bchw).abs().max()
 
@@ -99,16 +134,59 @@ def test_memory_attention_wrapper_matches_hf(model):
 @torch.no_grad()
 def test_memory_attention_padding_is_inert(model):
     torch.manual_seed(2)
-    n_maps, n_ptr = 2, 4
-    seq = n_maps * TOKENS_PER_MAP + n_ptr
     feats = torch.randn(1, HIDDEN, GRID, GRID)
     pos = torch.randn(1, HIDDEN, GRID, GRID)
-    mem_seq = torch.randn(seq, 1, MEM_DIM)
-    mem_pos_seq = torch.randn(seq, 1, MEM_DIM)
     w = EdgeTamMemoryAttentionWrapper(model).eval()
-    clean = w(feats, pos, *pad_kv(mem_seq, mem_pos_seq, n_maps, n_ptr, fill=0.0))
-    poisoned = w(feats, pos, *pad_kv(mem_seq, mem_pos_seq, n_maps, n_ptr, fill=1e3))
+
+    torch.manual_seed(20)
+    clean_inputs, *_ = build_separated_inputs(model, 2, 1, fill=0.0)
+    torch.manual_seed(20)
+    poisoned_inputs, *_ = build_separated_inputs(model, 2, 1, fill=1e3)
+
+    clean = w(feats, pos, *clean_inputs)
+    poisoned = w(feats, pos, *poisoned_inputs)
     assert torch.equal(clean, poisoned)
+
+
+@torch.no_grad()
+def test_memory_attention_tpos_gather_matches_direct_add(model):
+    """The in-graph `tpos_table[idx]` gather must equal a direct row lookup —
+    guards against an off-by-one in the clamp/gather that padding-inertness
+    alone would not catch (padding is masked, but valid rows are not)."""
+    torch.manual_seed(3)
+    tpos = model.memory_temporal_positional_encoding.detach().reshape(MAX_MEMORY_MAPS, MEM_DIM)
+    feats = torch.randn(1, HIDDEN, GRID, GRID)
+    pos = torch.randn(1, HIDDEN, GRID, GRID)
+    w = EdgeTamMemoryAttentionWrapper(model).eval()
+
+    memory_spatial = torch.zeros(1, MAX_MEMORY_MAPS, TOKENS_PER_MAP, MEM_DIM)
+    memory_spatial[0, 0] = torch.randn(TOKENS_PER_MAP, MEM_DIM)
+    memory_spatial_pos = torch.zeros(1, MAX_MEMORY_MAPS, TOKENS_PER_MAP, MEM_DIM)
+    object_pointers = torch.zeros(1, MAX_OBJECT_POINTERS, 256)
+    memory_mask = torch.zeros(1, KV_LEN, dtype=torch.bool)
+    memory_mask[0, :TOKENS_PER_MAP] = True
+    pointer_deltas = torch.zeros(1, MAX_OBJECT_POINTERS, dtype=torch.int64)
+    pointer_mask = torch.zeros(1, MAX_OBJECT_POINTERS, dtype=torch.bool)
+
+    for row in range(MAX_MEMORY_MAPS):
+        tpos_indices = torch.full((1, MAX_MEMORY_MAPS), -1, dtype=torch.int64)
+        tpos_indices[0, 0] = row
+        got = w(feats, pos, memory_spatial, memory_spatial_pos, tpos_indices,
+                 memory_mask, object_pointers, pointer_deltas, pointer_mask)
+
+        # Reference: assemble the seq-first KV with the row added directly.
+        mem_seq = memory_spatial[0, 0].unsqueeze(1)
+        mem_pos_seq = tpos[row].expand(TOKENS_PER_MAP, MEM_DIM).unsqueeze(1)
+        hf_out = model.memory_attention(
+            current_vision_features=feats.flatten(2).permute(2, 0, 1),
+            current_vision_position_embeddings=pos.flatten(2).permute(2, 0, 1),
+            memory=mem_seq,
+            memory_posision_embeddings=mem_pos_seq,
+            num_object_pointer_tokens=0,
+            num_spatial_memory_tokens=1,
+        )
+        want = hf_out.squeeze(1).transpose(1, 2).reshape(1, HIDDEN, GRID, GRID)
+        assert torch.allclose(got, want, atol=1e-5), f"row {row}: {(got - want).abs().max()}"
 
 
 @torch.no_grad()
@@ -152,7 +230,13 @@ def test_mask_decoder_wrapper_matches_single_frame_forward(model):
 def test_memory_encoder_wrapper_matches_encode_new_memory(model, prompted):
     torch.manual_seed(5)
     feats_seq = torch.randn(GRID * GRID, 1, HIDDEN)
-    high_res_masks = torch.randn(1, 1, IMAGE_SIZE, IMAGE_SIZE) * 8
+    # LOW-res decoder output (== mask_decoder_video's `low_res_masks` /
+    # maskLogits semantic key) — PIN-7 reconciliation: the wrapper now
+    # upsamples in-graph, so the HF reference upsamples identically here.
+    low_res_masks = torch.randn(1, 1, GRID * 4, GRID * 4) * 8
+    high_res_masks = torch.nn.functional.interpolate(
+        low_res_masks.float(), size=(IMAGE_SIZE, IMAGE_SIZE), mode="bilinear", align_corners=False
+    )
     hf_feats, hf_pos = model._encode_new_memory(
         current_vision_feats=feats_seq,
         pred_masks_high_res=high_res_masks,
@@ -161,7 +245,7 @@ def test_memory_encoder_wrapper_matches_encode_new_memory(model, prompted):
     )
     w = EdgeTamMemoryEncoderWrapper(model).eval()
     feats_bchw = feats_seq[:, 0].T.reshape(1, HIDDEN, GRID, GRID).contiguous()
-    got_feats, got_pos = w(feats_bchw, high_res_masks,
+    got_feats, got_pos = w(feats_bchw, low_res_masks,
                            torch.tensor([1.0 if prompted else 0.0]))
     assert torch.allclose(got_feats, hf_feats, atol=1e-6)
     assert torch.allclose(got_pos, hf_pos, atol=1e-6)

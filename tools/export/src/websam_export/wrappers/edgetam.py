@@ -125,23 +125,56 @@ class EdgeTamNoMemEmbedWrapper(nn.Module):
 
 
 class EdgeTamMemoryAttentionWrapper(nn.Module):
-    """``memory_attention.onnx`` — fixed-max padded KV + additive attention bias.
+    """``memory_attention.onnx`` — separated JS-fed inputs, in-graph KV assembly.
 
     Functionally re-implements ``EdgeTamVideoMemoryAttention.forward``
     (L1229-1277) + ``EdgeTamVideoMemoryAttentionLayer.forward`` (L1183-1214)
     + the RoPE self/cross attention (L338-377, L476-528, L380-452), reusing
-    the checkpoint's weights, with two deliberate changes:
+    the checkpoint's weights.
 
-    1. KV length frozen at :data:`KV_LEN` (= 7 maps x 512 + 64 ptr tokens);
-       ``num_k_exclude_rope`` frozen at 64 and ``rope_k_repeat`` at 7.
-    2. ``attn_bias`` (1, 1, 1, KV_LEN) float32 is ADDED to the cross-attention
-       scores (HF passes ``attention_mask=None`` here; eager attention's
-       additive-mask hook, L189-191, is the sanctioned insertion point).
-       0 = valid token, :data:`ATTN_BIAS_NEG` = padding. Self-attention over
-       the 4096 queries is never masked, matching HF.
+    INTERFACE RECONCILIATION (M2 wave-3 production export): the S0/spike
+    version of this wrapper took one PRE-ASSEMBLED ``(1, KV_LEN, 64)`` memory
+    buffer with tpos already added and pointers already concatenated — that
+    doesn't match the committed JS engine, which feeds the memory bank's
+    physical rings and small per-slot metadata SEPARATED
+    (``packages/core/src/worker/video/memory-bank.ts``'s ``MemoryAssembly``,
+    ``video-engine.ts``'s ``#conditionOne``, ``docs/m2-internal-contracts.md``
+    §2.2). Chosen fix: re-export this graph to do the assembly IN-GRAPH
+    instead of adding a JS-side shim — the ops involved (a table gather, a
+    broadcast add, two reshapes, one concat, one compare-and-select for the
+    bias) are all dynamo-exportable, so pushing them into the graph avoids a
+    second maintained implementation of the padding/RoPE-group layout on the
+    JS side. Concretely, this wrapper now accepts:
 
-    IO is batch-first: queries in/out as BCHW (1,256,64,64), memory KV as
-    (1, KV_LEN, 64). The wrapper folds HF's seq-first permutes.
+    * ``queries`` / ``queries_pos``            — unchanged (BCHW frame feats).
+    * ``memory_spatial`` (1, M, T, 64)          — the bank's spatial-feature ring, M=7 maps.
+    * ``memory_spatial_pos`` (1, M, T, 64)      — the bank's spatial positional-encoding ring
+      (the frame-independent constant memory_encoder emits, NOT tpos-combined).
+    * ``tpos_indices`` (1, M) int64             — per-slot row into the learned
+      ``memory_temporal_positional_encoding`` table (-1 for an invalid slot);
+      GATHERED in-graph and added to ``memory_spatial_pos`` (mirrors
+      ``dump_constants.py`` / e2e_loop.py's ``MemoryBank.assemble``: cond -> row 6,
+      recent offset k -> row k-1). Invalid slots gather row 0 (clamped) but are
+      masked out by ``memory_mask``, so the garbage value never reaches softmax.
+    * ``memory_mask`` (1, kvLen) bool           — per-KV-token validity, turned
+      into the additive bias (0 valid / :data:`ATTN_BIAS_NEG` padding) in-graph
+      instead of being pre-computed by the caller.
+    * ``object_pointers`` (1, P, 256) f32       — raw pointer bank; split into
+      ``PTR_SPLITS`` (4) consecutive 64-d tokens per pointer IN-GRAPH (mirrors
+      ``_prepare_memory_conditioned_features`` L2771-2778) instead of the caller
+      pre-splitting.
+    * ``pointer_deltas`` (1, P) int64 and ``pointer_mask`` (1, P) bool are
+      accepted per the §2.2 contract (every EdgeTAM-family memoryAttention
+      graph takes them) but UNUSED: this checkpoint has
+      ``enable_temporal_pos_encoding_for_object_pointers=False`` (FINDINGS.md
+      divergence 4), so pointer positional embeddings are exactly zero and
+      pointer validity is already folded into ``memory_mask``.
+
+    KV length is still frozen at :data:`KV_LEN` (7 maps x 512 + 64 ptr
+    tokens); ``num_k_exclude_rope`` frozen at 64, ``rope_k_repeat`` at 7.
+
+    IO is batch-first: queries in/out as BCHW (1,256,64,64). The wrapper folds
+    HF's seq-first permutes.
     """
 
     def __init__(self, model):
@@ -156,6 +189,11 @@ class EdgeTamMemoryAttentionWrapper(nn.Module):
         self.register_buffer("rope_sin_q", sin_q, persistent=False)
         self.register_buffer("rope_cos_k", cos_k, persistent=False)  # (256, 256)
         self.register_buffer("rope_sin_k", sin_k, persistent=False)
+        # (7, 64) — dump_constants.py's tpos_table.npy, baked into the graph
+        # instead of shipped as a separate JS-side asset (removes a fetch +
+        # a manual per-slot add from the engine's hot per-frame path).
+        tpos = model.memory_temporal_positional_encoding.detach().reshape(MAX_MEMORY_MAPS, MEM_DIM)
+        self.register_buffer("tpos_table", tpos, persistent=False)
 
     def _rope_q(self, q: Tensor) -> Tensor:
         # apply_rotary_pos_emb_2d_* query path (L308-310 / L406-408).
@@ -220,6 +258,46 @@ class EdgeTamMemoryAttentionWrapper(nn.Module):
         return attn.o_proj(out)
 
     def forward(
+        self,
+        current_vision_features: Tensor,  # (1, 256, 64, 64) raw frame features
+        current_vision_pos_embed: Tensor,  # (1, 256, 64, 64) sine pos encoding
+        memory_spatial: Tensor,           # (1, M, T, 64) bank spatial-feature ring
+        memory_spatial_pos: Tensor,       # (1, M, T, 64) bank spatial pos-encoding ring
+        tpos_indices: Tensor,             # (1, M) int64, -1 = invalid slot
+        memory_mask: Tensor,              # (1, KV_LEN) bool, True = valid
+        object_pointers: Tensor,          # (1, P, 256) f32 raw pointer bank
+        pointer_deltas: Tensor,           # (1, P) int64, UNUSED (see class docstring)
+        pointer_mask: Tensor,             # (1, P) bool, UNUSED (see class docstring)
+    ) -> Tensor:
+        del pointer_deltas, pointer_mask  # accepted for §2.2 IO parity; no-op on EdgeTAM
+
+        # --- in-graph KV assembly (was the JS/caller's job pre-reconciliation) ---
+        idx = torch.clamp(tpos_indices, min=0, max=MAX_MEMORY_MAPS - 1)  # (1, M)
+        tpos_rows = self.tpos_table[idx]  # (1, M, 64) gather
+        tpos_rows = tpos_rows.unsqueeze(2)  # (1, M, 1, 64), broadcasts over T
+        mem_pos_full = memory_spatial_pos + tpos_rows  # (1, M, T, 64)
+
+        b = memory_spatial.shape[0]
+        mem_flat = memory_spatial.reshape(b, -1, MEM_DIM)  # (1, M*T, 64)
+        mem_pos_flat = mem_pos_full.reshape(b, -1, MEM_DIM)  # (1, M*T, 64)
+
+        # Pointer bank: split each 256-d pointer into PTR_SPLITS (4) 64-d
+        # tokens, pointer-major (matches e2e_loop.py's `ptr.reshape(4, 64)`
+        # placement at `[ptr_base + i*4 : ptr_base + i*4 + 4)`). Pointer
+        # positional embedding is exactly zero (temporal PE disabled).
+        ptr_tokens = object_pointers.reshape(b, -1, MEM_DIM)  # (1, P*4, 64)
+        ptr_pos = torch.zeros_like(ptr_tokens)
+
+        memory = torch.cat([mem_flat, ptr_tokens], dim=1)  # (1, KV_LEN, 64)
+        memory_pos_embed = torch.cat([mem_pos_flat, ptr_pos], dim=1)
+
+        mask_f = memory_mask.to(memory.dtype)  # (1, KV_LEN)
+        attn_bias = (1.0 - mask_f) * ATTN_BIAS_NEG
+        attn_bias = attn_bias.view(b, 1, 1, -1)  # (1, 1, 1, KV_LEN)
+
+        return self._attend(current_vision_features, current_vision_pos_embed, memory, memory_pos_embed, attn_bias)
+
+    def _attend(
         self,
         current_vision_features: Tensor,   # (1, 256, 64, 64) raw frame features
         current_vision_pos_embed: Tensor,  # (1, 256, 64, 64) sine pos encoding
@@ -358,6 +436,20 @@ class EdgeTamMemoryEncoderWrapper(nn.Module):
     (binarize vs sigmoid, L3046-3051) is folded in via a float ``is_prompted``
     input so the graph is branch-free.
 
+    INTERFACE RECONCILIATION (M2 wave-3 production export, PIN-7 /
+    ``docs/m2-internal-contracts.md`` §2.2): the S0/spike version of this
+    wrapper took the decoder's ALREADY-UPSAMPLED ``high_res_masks``
+    (1, 1, 1024, 1024). The committed contract's `memoryEncoder` semantic-key
+    table instead feeds the LOW-res decoder output (`maskLogits`,
+    (1, 1, 256, 256) = ``mask_decoder_video``'s ``low_res_masks``, the SAME
+    tensor the engine reads back for on-screen display) and requires the
+    256->1024 bilinear upsample to happen IN-GRAPH here — mirrors
+    ``EdgeTamMaskDecoderVideoWrapper``'s own upsample
+    (``align_corners=False``, ``mode="bilinear"``, L2462-2471) so the two
+    wrappers can never disagree on interpolation semantics. This lets the JS
+    engine feed ONE decoder output to BOTH the display path and the memory
+    path without a second (1024x1024) tensor crossing the worker boundary.
+
     ``object_score_logits`` is NOT an input: this checkpoint has
     ``enable_occlusion_spatial_embedding=False`` so the occlusion-embedding add
     (L3062-3066) is dead code.
@@ -375,9 +467,15 @@ class EdgeTamMemoryEncoderWrapper(nn.Module):
     def forward(
         self,
         vision_features: Tensor,  # (1, 256, 64, 64) RAW frame features (no no_mem_embed)
-        high_res_masks: Tensor,   # (1, 1, 1024, 1024) decoder mask logits
+        mask_logits: Tensor,      # (1, 1, 256, 256) LOW-res decoder mask logits (== maskDecoderVideo's maskLogits output)
         is_prompted: Tensor,      # (1,) float32: 1.0 if this frame had point/mask inputs
     ) -> tuple[Tensor, Tensor]:
+        high_res_masks = nn.functional.interpolate(
+            mask_logits.float(),
+            size=(IMAGE_SIZE, IMAGE_SIZE),
+            mode="bilinear",
+            align_corners=False,
+        )                                                                # mirrors mask_decoder_video L2462-2471
         binarized = (high_res_masks > 0).to(high_res_masks.dtype)
         soft = torch.sigmoid(high_res_masks)
         mask_for_mem = torch.where(is_prompted.view(1, 1, 1, 1) > 0.5, binarized, soft)

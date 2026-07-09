@@ -15,6 +15,7 @@
   "dependencies": {
     "@websam/core": "workspace:^",
     "@websam/react": "workspace:^",
+    "@websam/video-editing": "workspace:^",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },

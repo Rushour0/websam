@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { WasmBackend, WebGpuBackend, listModels } from '@websam/core';
 import { ImageTab } from './ImageTab';
+import { VideoTab } from './VideoTab';
 
 /**
  * A backend probe or model-registry entry rendered generically. The demo
@@ -227,10 +228,11 @@ function CapabilityTab() {
 }
 
 /** Top-level demo tabs. */
-type TabId = 'image' | 'capabilities';
+type TabId = 'image' | 'video' | 'capabilities';
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'image', label: 'image' },
+  { id: 'video', label: 'video' },
   { id: 'capabilities', label: 'capabilities' },
 ];
 
@@ -243,7 +245,7 @@ export function App() {
   const [tab, setTab] = useState<TabId>('image');
 
   return (
-    <main className={tab === 'image' ? 'page page-wide' : 'page'}>
+    <main className={tab === 'image' || tab === 'video' ? 'page page-wide' : 'page'}>
       <header className="page-header">
         <h1>
           websam rotobrush <span className="tag">pre-alpha</span>
@@ -269,7 +271,9 @@ export function App() {
         ))}
       </nav>
 
-      {tab === 'image' ? <ImageTab /> : <CapabilityTab />}
+      {tab === 'image' && <ImageTab />}
+      {tab === 'video' && <VideoTab />}
+      {tab === 'capabilities' && <CapabilityTab />}
 
       <footer className="page-footer muted">
         <p>

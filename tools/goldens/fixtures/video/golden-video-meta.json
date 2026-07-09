@@ -1,0 +1,64 @@
+{
+  "model_id": "yonigozlan/EdgeTAM-hf",
+  "model_revision": "c266ce53b3fc00f0f495b583f6a116c4e57f53bb",
+  "dtype": "float32 (golden reference); manifest ships fp16",
+  "clip": {
+    "path": "clip-256.mp4",
+    "numFrames": 10,
+    "width": 256,
+    "height": 256,
+    "fps": 10
+  },
+  "prompt": {
+    "frameIndex": 0,
+    "type": "point",
+    "x": 60,
+    "y": 128,
+    "label": 1,
+    "note": "source-pixel coords (256-space); the browser rescales via computeTransform, mode 'square-stretch'"
+  },
+  "preprocess": {
+    "mode": "square-stretch",
+    "inputSize": 1024,
+    "mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "std": [
+      0.229,
+      0.224,
+      0.225
+    ]
+  },
+  "iouGate": 0.9,
+  "masks": [
+    "golden-mask-f0.rle.json",
+    "golden-mask-f1.rle.json",
+    "golden-mask-f2.rle.json",
+    "golden-mask-f3.rle.json",
+    "golden-mask-f4.rle.json",
+    "golden-mask-f5.rle.json",
+    "golden-mask-f6.rle.json",
+    "golden-mask-f7.rle.json",
+    "golden-mask-f8.rle.json",
+    "golden-mask-f9.rle.json"
+  ],
+  "masksSha256": [
+    "f6d890439963d5774ef00ed74be46b965f0a3528df402e30770d02c6e0048ec3",
+    "9fca187aa33a8023cb285300220976561b5acafb6b828305b6e6b4c527d29134",
+    "af5de68b44284d5f25761eef1060b5d83ce346ed9e0a292e1389aaa967639ca7",
+    "1ba7f07f5665298d10c7f7d7f6fb699b981b6dcb370aa86b8d3ccc0c76d8c31d",
+    "455644e166dd8e2bfa7e8e06d4bc990734bf7a707110d0b3b0376d30a78fde96",
+    "33e5b7e8932aee4d539f9c6ac58e7ef0961deb1507c05848c3d28a6ee1f6248c",
+    "33636a58a08c0c24d39ad158438383cfca4f81d5d8fce16c06fb4f2fb6f5182b",
+    "cfa60fa4cf9bdd73a7be4f40e4c29a6c8f281da4cce6cf709a122f22e3e44e16",
+    "e40b42207bbe41e31ecd26d2c9121cde0f008c55d4ddddd94ebf3c0062f35de9",
+    "f9126bf250840eea13e2edf07f5f0fbd443cac63de501060b38deae6e9120eb6"
+  ],
+  "toolchain": {
+    "python": "3.12.13",
+    "pytorch": "2.12.1"
+  },
+  "note": "Golden masks are HF EdgeTamVideoModel fp32 PyTorch output (the SAME authority tools/export's parity tests compare the exported ONNX graphs against). The browser pipeline (fp16, WebGPU/wasm) must match each frame at IoU >= iouGate."
+}

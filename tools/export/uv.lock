@@ -653,6 +653,20 @@ wheels = [
 ]
 
 [[package]]
+name = "onnxconverter-common"
+version = "1.16.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "onnx" },
+    { name = "packaging" },
+    { name = "protobuf" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4a/67/8dca1868a6e226f8d3f7d666cb6a48b79a60aad5267b16b24627cd8d9eb8/onnxconverter_common-1.16.0-py2.py3-none-any.whl", hash = "sha256:df39ee96f17fff119dff10dd245467651b60b9e8a96020eb93402239794852f7", size = 89511, upload-time = "2025-08-28T19:37:46.988Z" },
+]
+
+[[package]]
 name = "onnxruntime"
 version = "1.27.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1242,6 +1256,7 @@ dependencies = [
 
 [package.optional-dependencies]
 export = [
+    { name = "onnxconverter-common" },
     { name = "onnxscript" },
     { name = "onnxslim" },
     { name = "timm" },
@@ -1259,6 +1274,7 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=1.22.0,<2" },
     { name = "numpy", specifier = ">=2.5.1,<3" },
     { name = "onnx", specifier = ">=1.22.0,<2" },
+    { name = "onnxconverter-common", marker = "extra == 'export'", specifier = ">=1.16.0,<2" },
     { name = "onnxruntime", specifier = ">=1.27.0,<1.28.0" },
     { name = "onnxscript", marker = "extra == 'export'", specifier = ">=0.2.0,<1" },
     { name = "onnxslim", marker = "extra == 'export'", specifier = ">=0.1.94,<0.2" },

@@ -61,6 +61,9 @@ importers:
       '@websam/react':
         specifier: workspace:^
         version: link:../../packages/react
+      '@websam/video-editing':
+        specifier: workspace:^
+        version: link:../../packages/video-editing
       react:
         specifier: ^19.2.7
         version: 19.2.7
