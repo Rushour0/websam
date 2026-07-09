@@ -1,6 +1,6 @@
 {
   "name": "@websam/core",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "SAM-family interactive image & video segmentation in the browser (WebGPU-first, WASM fallback)",
   "type": "module",
   "license": "MIT",
@@ -46,5 +46,9 @@
     "tsdown": "^0.22.4",
     "typescript": "^5.9.3",
     "vitest": "^3.2.7"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": false
   }
 }

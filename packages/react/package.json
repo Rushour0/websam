@@ -1,6 +1,6 @@
 {
   "name": "@websam/react",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "React hooks for WebSAM in-browser image and video segmentation.",
   "type": "module",
   "license": "MIT",
@@ -48,5 +48,9 @@
     "url": "git+https://github.com/Rushour0/websam.git",
     "directory": "packages/react"
   },
-  "homepage": "https://github.com/Rushour0/websam#readme"
+  "homepage": "https://github.com/Rushour0/websam#readme",
+  "publishConfig": {
+    "access": "public",
+    "provenance": false
+  }
 }
