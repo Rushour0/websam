@@ -3,12 +3,12 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Webpack build canary for @websam/core packaging (exports map, tree-shaking, worker/asset resolution)",
+  "description": "Webpack build canary for @websam3/core packaging (exports map, tree-shaking, worker/asset resolution)",
   "scripts": {
     "build": "webpack"
   },
   "dependencies": {
-    "@websam/core": "workspace:^"
+    "@websam3/core": "workspace:^"
   },
   "devDependencies": {
     "ts-loader": "^9.6.2",

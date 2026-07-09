@@ -23,7 +23,7 @@ importers:
 
   apps/bundler-matrix/vite:
     dependencies:
-      '@websam/core':
+      '@websam3/core':
         specifier: workspace:^
         version: link:../../../packages/core
     devDependencies:
@@ -36,7 +36,7 @@ importers:
 
   apps/bundler-matrix/webpack:
     dependencies:
-      '@websam/core':
+      '@websam3/core':
         specifier: workspace:^
         version: link:../../../packages/core
     devDependencies:
@@ -55,13 +55,13 @@ importers:
 
   apps/demo:
     dependencies:
-      '@websam/core':
+      '@websam3/core':
         specifier: workspace:^
         version: link:../../packages/core
-      '@websam/react':
+      '@websam3/react':
         specifier: workspace:^
         version: link:../../packages/react
-      '@websam/video-editing':
+      '@websam3/video-editing':
         specifier: workspace:^
         version: link:../../packages/video-editing
       react:
@@ -117,7 +117,7 @@ importers:
 
   packages/react:
     dependencies:
-      '@websam/core':
+      '@websam3/core':
         specifier: workspace:^
         version: link:../core
     devDependencies:
@@ -151,7 +151,7 @@ importers:
 
   packages/video-editing:
     dependencies:
-      '@websam/core':
+      '@websam3/core':
         specifier: workspace:^
         version: link:../core
       fflate:

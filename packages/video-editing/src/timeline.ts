@@ -1,4 +1,4 @@
-import type { FramePropagationResult, RLEMask } from '@websam/core';
+import type { FramePropagationResult, RLEMask } from '@websam3/core';
 
 /**
  * Construction parameters for a {@link MaskTimeline}.
@@ -84,7 +84,7 @@ interface ObjectTrack {
  *
  * Each tracked object owns a sorted `Map<frameIndex, RLEMask>` plus an
  * *epoch* counter that pairs with the `refineObject` contract in
- * `@websam/core`: when a user refines an object at some frame, downstream
+ * `@websam3/core`: when a user refines an object at some frame, downstream
  * propagated masks become stale — {@link invalidateAfter} drops them and
  * bumps the epoch, and any late {@link set} carrying the old epoch is
  * silently rejected instead of resurrecting stale masks.
@@ -191,7 +191,7 @@ export class MaskTimeline {
    * Drop every mask of `objectId` at frames strictly after `frameIndex`
    * and advance the object's epoch by one.
    *
-   * Pairs with the `refineObject` epoch contract in `@websam/core`: call
+   * Pairs with the `refineObject` epoch contract in `@websam3/core`: call
    * this when the object is refined at `frameIndex`, then re-propagate
    * under the returned epoch. Any straggler {@link set} still carrying the
    * previous epoch will be rejected.

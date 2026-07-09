@@ -35,8 +35,8 @@ Ownership decisions (explicit):
 - `packages/core/package.json` → frame-source only (single-line dep add; conflicts impossible).
 - Wave-2 cross-import (video-session → `src/worker/protocol.ts` types) is pinned **verbatim** by
   §5, same pattern as M1 §3.1; the wave-2 gate (typecheck+build) catches drift.
-- Waves gate: after each wave `pnpm -F @websam/core build && pnpm -F @websam/core test` (+
-  `-F @websam/video-editing` after wave 1); wave 3 adds `test:browser` + demo build.
+- Waves gate: after each wave `pnpm -F @websam3/core build && pnpm -F @websam3/core test` (+
+  `-F @websam3/video-editing` after wave 1); wave 3 adds `test:browser` + demo build.
 
 Dependency order: wave 1 items are mutually disjoint. worker-video depends on backend-video +
 memory-bank + frame-source; video-session depends on protocol §5 (types only). demo + e2e depend
@@ -523,7 +523,7 @@ consistent with §6.1. `startFrame` defaults to 0, `endFrame` to `frameCount`.
 
 ---
 
-## 7. `@websam/video-editing` additions (editing agent)
+## 7. `@websam3/video-editing` additions (editing agent)
 
 ### 7.1 `exporter.ts` — PNG-zip becomes real
 
@@ -661,7 +661,7 @@ silent skip once models exist — same M1 rule). Wiring, pinned now:
 
 ### 9.4 Wave gates
 
-Wave 1/2: `pnpm -F @websam/core -F @websam/video-editing build && test` (+ publint/attw stay
+Wave 1/2: `pnpm -F @websam3/core -F @websam3/video-editing build && test` (+ publint/attw stay
 green — no export-map changes expected). Wave 3: + `test:browser` + demo build + bundler-matrix
 (mp4box must not leak into the index chunk — it is imported only from worker-reachable modules).
 

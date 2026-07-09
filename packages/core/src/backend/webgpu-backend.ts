@@ -84,7 +84,7 @@ function validateCopyRegion(src: DeviceTensor, dst: DeviceTensor, slotIndex: num
 
 /**
  * Structural subset of the WebGPU device API this backend touches, declared
- * locally so @websam/core need not depend on `@webgpu/types`. Per ⚠REV
+ * locally so @websam3/core need not depend on `@webgpu/types`. Per ⚠REV
  * ORT#26107 the device is READ from ort (`ort.env.webgpu.device`), never
  * created by websam.
  */
@@ -128,7 +128,7 @@ function gpuBufferOf(tensor: DeviceTensor): GpuBufferLike {
 
 /**
  * Structural subset of the WebGPU API that probing needs. Declared locally
- * so @websam/core does not depend on `@webgpu/types` — probing only touches
+ * so @websam3/core does not depend on `@webgpu/types` — probing only touches
  * `navigator.gpu.requestAdapter()` and `adapter.features`.
  */
 interface GpuAdapterLike {

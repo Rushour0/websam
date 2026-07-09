@@ -3,12 +3,12 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Vite build canary for @websam/core packaging (exports map, tree-shaking, worker/asset resolution)",
+  "description": "Vite build canary for @websam3/core packaging (exports map, tree-shaking, worker/asset resolution)",
   "scripts": {
     "build": "vite build"
   },
   "dependencies": {
-    "@websam/core": "workspace:^"
+    "@websam3/core": "workspace:^"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

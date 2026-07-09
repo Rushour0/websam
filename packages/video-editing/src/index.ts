@@ -1,6 +1,6 @@
 /**
- * @websam/video-editing — mask timeline storage, alpha-matte export, and
- * mask compositing on top of `@websam/core`.
+ * @websam3/video-editing — mask timeline storage, alpha-matte export, and
+ * mask compositing on top of `@websam3/core`.
  *
  * @packageDocumentation
  */

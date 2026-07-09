@@ -1,5 +1,5 @@
 /**
- * Typed error taxonomy for @websam/core.
+ * Typed error taxonomy for @websam3/core.
  *
  * Every error thrown by websam extends {@link WebsamError} and carries a
  * stable string {@link WebsamError.code} discriminant, so callers can switch

@@ -13,9 +13,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@websam/core": "workspace:^",
-    "@websam/react": "workspace:^",
-    "@websam/video-editing": "workspace:^",
+    "@websam3/core": "workspace:^",
+    "@websam3/react": "workspace:^",
+    "@websam3/video-editing": "workspace:^",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },

@@ -1,7 +1,7 @@
 import { StrictMode } from 'react';
 import { render, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import type { Segmenter } from '@websam/core';
+import type { Segmenter } from '@websam3/core';
 import {
   useSegmenter,
   type SegmenterLoader,

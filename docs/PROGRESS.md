@@ -14,13 +14,13 @@ Plan of record: `~/.claude/plans/lets-build-something-from-goofy-dragon.md` (pla
 ## Milestone status
 
 ### M0 — scaffold + contracts ✅ (commit `fa8a296`)
-pnpm monorepo; `@websam/core` (Backend abstraction, error taxonomy, coords, RLE+COCO, registry, Segmenter/session contracts), `@websam/video-editing` (MaskTimeline), `@websam/react` (StrictMode-safe useSegmenter), demo shell w/ capability probes, bundler-matrix (Vite+webpack), `tools/export` (Python/uv). Gate green: build+typecheck+64 unit+browser ONNX smoke+42 py+publint+attw. CI uses xvfb+SwiftShader for the WebGPU browser lane.
+pnpm monorepo; `@websam3/core` (Backend abstraction, error taxonomy, coords, RLE+COCO, registry, Segmenter/session contracts), `@websam3/video-editing` (MaskTimeline), `@websam3/react` (StrictMode-safe useSegmenter), demo shell w/ capability probes, bundler-matrix (Vite+webpack), `tools/export` (Python/uv). Gate green: build+typecheck+64 unit+browser ONNX smoke+42 py+publint+attw. CI uses xvfb+SwiftShader for the WebGPU browser lane.
 
 ### M1 — interactive image path ✅ (commits `68bb431` prep, `ff30dde` impl)
 - **S0 spike verdict REUSE-OK**: community `onnx-community/sam3-tracker-ONNX` vision encoder emits all 3 FPN outputs the decoder needs. Coordinate mode **pinned = square-stretch** (anisotropic 1008×1008, mean=std=0.5, per-axis prompt scaling); decoder logits 288×288. See `tools/export/spikes/s0/FINDINGS.md`.
 - **Golden fixtures**: deterministic transformers.js (q4f16) reference masks on a 640×427 non-square scene → `tools/goldens/fixtures/`.
 - Full pipeline real: manifest-driven weight loading (streaming SHA-256, OPFS/Cache-API content-addressed stores, Range-resume), ORT runtime + device/quant resolution + real WebGPU/WASM Backend bodies, Comlink module worker (preprocess → encoder → per-click decoder → 288→source mask), `createSegmenter`/`ImageSession`, `MaskResultImpl`, demo image tab.
-- **Gate green**: 258 unit + 20 browser tests. **M1 golden gate PASSED**: our pipeline reproduces transformers.js masks at **IoU 0.9957 / 0.9962** (bar 0.9) on the wasm EP. `dist/worker.js` ships as `@websam/core/worker`.
+- **Gate green**: 258 unit + 20 browser tests. **M1 golden gate PASSED**: our pipeline reproduces transformers.js masks at **IoU 0.9957 / 0.9962** (bar 0.9) on the wasm EP. `dist/worker.js` ships as `@websam3/core/worker`.
 
 ### M2 — EdgeTAM video + rotobrush demo 🟡 IN PROGRESS (paused)
 **Done & solid (uncommitted WIP — see "Working tree" below):**

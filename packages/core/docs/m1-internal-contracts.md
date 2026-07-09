@@ -574,7 +574,7 @@ into the golden mask's model-space footprint under `EncodeResponse.transform`.
 `mask.toImageData()` at 50% alpha on a canvas → show `score`, `encodeMs`, load-progress bar from
 `onProgress`. `App.tsx` gains the tab switch only.
 
-### 6.4 Dependency-ordered apply waves (gate after every wave: `pnpm -F @websam/core build && test`; wave 3 adds `test:browser` + demo build)
+### 6.4 Dependency-ordered apply waves (gate after every wave: `pnpm -F @websam3/core build && test`; wave 3 adds `test:browser` + demo build)
 
 | Wave | Agent | Files (see §0 for the full lists) | Depends on |
 |---|---|---|---|

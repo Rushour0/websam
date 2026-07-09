@@ -1,5 +1,5 @@
-import { NotImplementedError } from '@websam/core';
-import type { RLEMask } from '@websam/core';
+import { NotImplementedError } from '@websam3/core';
+import type { RLEMask } from '@websam3/core';
 
 /**
  * How masks are blended over the source frame.

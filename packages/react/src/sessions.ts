@@ -1,5 +1,5 @@
-import { NotImplementedError } from '@websam/core';
-import type { SegmenterConfig } from '@websam/core';
+import { NotImplementedError } from '@websam3/core';
+import type { SegmenterConfig } from '@websam3/core';
 
 /**
  * Options for {@link useImageSession}.

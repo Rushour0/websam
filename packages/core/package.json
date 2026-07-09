@@ -1,5 +1,5 @@
 {
-  "name": "@websam/core",
+  "name": "@websam3/core",
   "version": "0.0.1",
   "description": "SAM-family interactive image & video segmentation in the browser (WebGPU-first, WASM fallback)",
   "type": "module",

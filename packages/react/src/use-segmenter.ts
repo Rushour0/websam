@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { Segmenter, SegmenterConfig } from '@websam/core';
+import type { Segmenter, SegmenterConfig } from '@websam3/core';
 
 /**
  * Lifecycle status of a segmenter load driven by {@link useSegmenter}.
@@ -30,7 +30,7 @@ export interface SegmenterLoaderContext {
 
 /**
  * The injectable loading seam used by {@link useSegmenter}. The default
- * loader calls `createSegmenter` from `@websam/core`; tests (and advanced
+ * loader calls `createSegmenter` from `@websam3/core`; tests (and advanced
  * consumers) may supply their own.
  */
 export type SegmenterLoader = (
@@ -43,7 +43,7 @@ export type SegmenterLoader = (
  */
 export interface UseSegmenterOptions {
   /**
-   * Replaces the default `@websam/core` loader. The loader's function
+   * Replaces the default `@websam3/core` loader. The loader's function
    * identity participates in the cache key, so pass a stable reference.
    */
   loader?: SegmenterLoader;
@@ -88,12 +88,12 @@ interface CacheEntry {
 const caches = new WeakMap<SegmenterLoader, Map<string, CacheEntry>>();
 
 /**
- * Default loader: defers to `createSegmenter` from `@websam/core`. Imported
+ * Default loader: defers to `createSegmenter` from `@websam3/core`. Imported
  * dynamically so the core runtime is only touched when this path actually
  * runs (at M0 it rejects with core's `NotImplementedError`).
  */
 const defaultLoader: SegmenterLoader = async (config) => {
-  const core = await import('@websam/core');
+  const core = await import('@websam3/core');
   return core.createSegmenter(config);
 };
 

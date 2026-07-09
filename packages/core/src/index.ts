@@ -1,5 +1,5 @@
 /**
- * @websam/core — SAM-family interactive image & video segmentation in the
+ * @websam3/core — SAM-family interactive image & video segmentation in the
  * browser (WebGPU-first, WASM fallback).
  *
  * M1 surface: the interactive image path is real — {@link createSegmenter}
@@ -127,7 +127,7 @@ export interface SegmenterConfig {
    * worker is spawned from the `worker.js` sibling of the library bundle via
    * `new URL('./worker.js', import.meta.url)`; bundlers that break that
    * relative resolution can point this at wherever they serve
-   * `@websam/core/worker`.
+   * `@websam3/core/worker`.
    */
   workerUrl?: string | URL;
   /**

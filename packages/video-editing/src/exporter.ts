@@ -1,4 +1,4 @@
-import { decodeRLE, InvalidStateError, NotImplementedError, type RLEMask } from '@websam/core';
+import { decodeRLE, InvalidStateError, NotImplementedError, type RLEMask } from '@websam3/core';
 import { Zip, ZipPassThrough } from 'fflate';
 import type { MaskTimeline } from './timeline.js';
 

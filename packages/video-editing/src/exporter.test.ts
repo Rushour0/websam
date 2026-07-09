@@ -6,7 +6,7 @@ import {
   type FramePropagationResult,
   type MaskResult,
   type RLEMask,
-} from '@websam/core';
+} from '@websam3/core';
 import { strFromU8, unzipSync } from 'fflate';
 import { AlphaMatteExporter } from './exporter.js';
 import { MaskTimeline } from './timeline.js';

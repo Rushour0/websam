@@ -1,5 +1,5 @@
 {
-  "name": "@websam/video-editing",
+  "name": "@websam3/video-editing",
   "version": "0.0.1",
   "description": "Mask timeline, alpha-matte export, and mask compositing for WebSAM video segmentation",
   "type": "module",
@@ -29,7 +29,7 @@
   },
   "homepage": "https://github.com/Rushour0/websam#readme",
   "dependencies": {
-    "@websam/core": "workspace:^",
+    "@websam3/core": "workspace:^",
     "fflate": "^0.8.3"
   },
   "devDependencies": {

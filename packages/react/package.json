@@ -1,5 +1,5 @@
 {
-  "name": "@websam/react",
+  "name": "@websam3/react",
   "version": "0.0.1",
   "description": "React hooks for WebSAM in-browser image and video segmentation.",
   "type": "module",
@@ -22,7 +22,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@websam/core": "workspace:^"
+    "@websam3/core": "workspace:^"
   },
   "peerDependencies": {
     "react": ">=18"

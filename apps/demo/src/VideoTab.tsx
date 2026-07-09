@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { createSegmenter } from '@websam/core';
+import { createSegmenter } from '@websam3/core';
 import type {
   FramePropagationResult,
   LoadProgressEvent,
@@ -7,11 +7,11 @@ import type {
   Prompt,
   Segmenter,
   VideoSession,
-} from '@websam/core';
-import { AlphaMatteExporter, MaskTimeline } from '@websam/video-editing';
+} from '@websam3/core';
+import { AlphaMatteExporter, MaskTimeline } from '@websam3/video-editing';
 // Vite bundles the core worker entry as a dedicated worker chunk and hands us
 // its URL — same escape hatch ImageTab uses.
-import segmenterWorkerUrl from '@websam/core/worker?worker&url';
+import segmenterWorkerUrl from '@websam3/core/worker?worker&url';
 
 /**
  * Where model manifests + weights are served from. Local dev default is

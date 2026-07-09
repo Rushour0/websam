@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { RLEMask } from '@websam/core';
+import type { RLEMask } from '@websam3/core';
 import { unzipSync } from 'fflate';
 import { AlphaMatteExporter } from './exporter.js';
 import { MaskTimeline } from './timeline.js';

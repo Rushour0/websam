@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { WasmBackend, WebGpuBackend, listModels } from '@websam/core';
+import { WasmBackend, WebGpuBackend, listModels } from '@websam3/core';
 import { ImageTab } from './ImageTab';
 import { VideoTab } from './VideoTab';
 
@@ -140,7 +140,7 @@ function ModelCard({ model }: { model: Report }) {
 
 /**
  * Capability-probe panel. On mount it runs `WebGpuBackend.probe()` and
- * `WasmBackend.probe()` from `@websam/core` and renders both capability
+ * `WasmBackend.probe()` from `@websam3/core` and renders both capability
  * reports, the browser environment facts that gate multithreaded WASM
  * (crossOriginIsolated), the recommended device, and the registered model
  * tiers from `listModels()` with license badges.

@@ -18,18 +18,18 @@ websam brings the Segment Anything Model family to the web platform:
 
 | Package | Description |
 | --- | --- |
-| [`@websam/core`](packages/core) | Model runtime: session management, image/video predictors, backends (WebGPU / WASM), mask decoding. |
-| [`@websam/video-editing`](packages/video-editing) | Video-editing utilities on top of core: tracklets, matting-oriented mask post-processing, export helpers. |
-| [`@websam/react`](packages/react) | React bindings: hooks and components for interactive segmentation UIs. |
+| [`@websam3/core`](packages/core) | Model runtime: session management, image/video predictors, backends (WebGPU / WASM), mask decoding. |
+| [`@websam3/video-editing`](packages/video-editing) | Video-editing utilities on top of core: tracklets, matting-oriented mask post-processing, export helpers. |
+| [`@websam3/react`](packages/react) | React bindings: hooks and components for interactive segmentation UIs. |
 
 ## Monorepo layout
 
 ```
 .
 ├── packages/
-│   ├── core/            # @websam/core
-│   ├── video-editing/   # @websam/video-editing
-│   └── react/           # @websam/react
+│   ├── core/            # @websam3/core
+│   ├── video-editing/   # @websam3/video-editing
+│   └── react/           # @websam3/react
 ├── apps/                # demo + bundler-matrix apps (not published)
 ├── tools/               # model export tooling (Python, ONNX)
 ├── tsconfig.base.json

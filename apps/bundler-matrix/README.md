@@ -1,6 +1,6 @@
 # bundler-matrix
 
-Tiny consumer apps that import `@websam/core` and **build in CI**, so that
+Tiny consumer apps that import `@websam3/core` and **build in CI**, so that
 worker/asset packaging regressions (broken `exports` map, non-ESM output,
 tree-shaking metadata, and later worker-entry/wasm asset resolution) fail a
 build here instead of in downstream users' projects.
@@ -19,7 +19,7 @@ Both entries do a **real value import** (`WebGpuBackend`, `listModels`) and
 render the result to the DOM, so the imports cannot be elided as type-only and
 a broken package surface fails the bundle step.
 
-At **M1**, when the `@websam/core` worker entry lands, a Next.js app joins the
+At **M1**, when the `@websam3/core` worker entry lands, a Next.js app joins the
 matrix (worker URL resolution + `new Worker(new URL(...))` packaging is the
 main thing bundlers disagree on).
 
@@ -33,7 +33,7 @@ pnpm --filter './apps/bundler-matrix/*' build
 
 The root `pnpm build` script only builds `packages/*`. CI must additionally run
 the line above in the `build-and-test` job of `.github/workflows/ci.yml`
-(after the `Build` step, so `@websam/core`'s `dist/` exists):
+(after the `Build` step, so `@websam3/core`'s `dist/` exists):
 
 ```yaml
 - name: Bundler matrix

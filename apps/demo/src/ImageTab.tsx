@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { createSegmenter } from '@websam/core';
+import { createSegmenter } from '@websam3/core';
 import type {
   ImageSession,
   LoadProgressEvent,
   MaskResult,
   Prompt,
   Segmenter,
-} from '@websam/core';
+} from '@websam3/core';
 // Vite bundles the core worker entry as a dedicated worker chunk and hands us
 // its URL — the documented `SegmenterConfig.workerUrl` escape hatch for
 // bundlers that break `new URL('./worker.js', import.meta.url)` resolution.
-import segmenterWorkerUrl from '@websam/core/worker?worker&url';
+import segmenterWorkerUrl from '@websam3/core/worker?worker&url';
 
 /**
  * Where model manifests + weights are served from. Local dev default is

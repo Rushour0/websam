@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { RLEMask } from '@websam/core';
+import type { RLEMask } from '@websam3/core';
 import { MaskTimeline } from './timeline.js';
 
 const WIDTH = 4;
