@@ -39,9 +39,23 @@ function fakeEngine(overrides: Partial<RemoteEngine> = {}): RemoteEngine {
     decode: vi.fn(async () => []),
     closeSession: vi.fn(async () => {}),
     dispose: vi.fn(async () => {}),
+    // Video RPCs (required on RemoteEngine since M2) — not exercised here.
+    createVideoSession: vi.fn(nope),
+    attachVideoSource: vi.fn(nope),
+    addVideoObject: vi.fn(nope),
+    refineVideoObject: vi.fn(nope),
+    removeVideoObject: vi.fn(nope),
+    propagateVideo: vi.fn(nope),
+    resetVideoSession: vi.fn(nope),
+    closeVideoSession: vi.fn(nope),
     ...overrides,
   };
 }
+
+/** A rejecting async stub usable for any RemoteEngine method not under test. */
+const nope = async (): Promise<never> => {
+  throw new Error('RPC: not under test');
+};
 
 function bitmap(): ImageBitmap {
   return new FakeImageBitmap() as unknown as ImageBitmap;

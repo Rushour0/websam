@@ -12,10 +12,14 @@
 import * as Comlink from 'comlink';
 import type { LoadProgressEvent } from '../index.js';
 import { installErrorTransferHandler } from '../worker/error-envelope.js';
+import type { Prompt } from '../segmenter.js';
 import type {
   DecodeRequest,
   EncodeResponse,
   MaskPayload,
+  PropagateRequest,
+  VideoObjectResult,
+  VideoSourceInfo,
   WorkerEngineApi,
   WorkerInitRequest,
   WorkerInitResult,
@@ -40,6 +44,23 @@ export interface RemoteEngine {
   decode(sessionId: number, req: DecodeRequest): Promise<MaskPayload[]>;
   closeSession(sessionId: number): Promise<void>;
   dispose(): Promise<void>;
+
+  // --- Video (M2, docs/m2-internal-contracts.md §5.1) — additive over the M1 image-path members above. ---
+  createVideoSession(): Promise<number>;
+  attachVideoSource(sessionId: number, source: Blob): Promise<VideoSourceInfo>;
+  addVideoObject(
+    sessionId: number,
+    req: { frameIndex: number; prompts: Prompt[]; objectId?: number; epoch: number },
+  ): Promise<VideoObjectResult>;
+  refineVideoObject(
+    sessionId: number,
+    req: { objectId: number; frameIndex: number; prompts: Prompt[]; epoch: number },
+  ): Promise<VideoObjectResult>;
+  removeVideoObject(sessionId: number, objectId: number): Promise<void>;
+  /** Starts the loop; the port (transferred) carries everything else. Resolves when the loop is scheduled. */
+  propagateVideo(sessionId: number, req: PropagateRequest, port: MessagePort): Promise<void>;
+  resetVideoSession(sessionId: number): Promise<void>;
+  closeVideoSession(sessionId: number): Promise<void>;
 }
 
 /** A spawned engine worker: the Comlink-wrapped API plus its kill switch. */

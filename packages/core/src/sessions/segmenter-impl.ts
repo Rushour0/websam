@@ -14,7 +14,7 @@
 import * as Comlink from 'comlink';
 import { WasmBackend } from '../backend/wasm-backend.js';
 import { WebGpuBackend } from '../backend/webgpu-backend.js';
-import { InvalidStateError, NotImplementedError, UnsupportedDeviceError } from '../errors.js';
+import { InvalidStateError, UnsupportedDeviceError } from '../errors.js';
 import type { SegmenterConfig } from '../index.js';
 import { getModel, type ModelSpec } from '../registry.js';
 import { resolveDevice } from '../runtime/resolve-device.js';
@@ -22,9 +22,14 @@ import type { ImageSession, ResolvedModelInfo, Segmenter, VideoSession } from '.
 import type { WorkerInitRequest, WorkerInitResult } from '../worker/protocol.js';
 import { ImageSessionImpl } from './image-session.js';
 import type { WorkerHandle } from './spawn-worker.js';
+import { VideoSessionImpl } from './video-session.js';
 
-/** M1 default tier: the only registered tier with image graphs (flips to 'edgetam' at M2). */
-const DEFAULT_MODEL_ID = 'sam3-tracker';
+/**
+ * M2 default tier: EdgeTAM is the only registered tier whose manifest really
+ * ships video graphs today (docs/m2-internal-contracts.md §6.3) — the SAM3
+ * tiers stay image-only (and SAM-licensed) until M3. Was `'sam3-tracker'` at M1.
+ */
+const DEFAULT_MODEL_ID = 'edgetam';
 
 const DEVICE_VALUES = ['webgpu', 'wasm', 'auto'] as const;
 const QUANT_VALUES = ['auto', 'fp16', 'int8', 'q4f16'] as const;
@@ -145,10 +150,12 @@ class SegmenterImpl implements Segmenter {
   readonly model: ResolvedModelInfo;
 
   readonly #handle: WorkerHandle;
+  readonly #spec: ModelSpec;
   #disposed = false;
 
   constructor(handle: WorkerHandle, spec: ModelSpec, init: WorkerInitResult) {
     this.#handle = handle;
+    this.#spec = spec;
     this.device = init.device;
     this.model = { spec, quant: init.quant, totalBytes: init.totalBytes };
   }
@@ -166,10 +173,24 @@ class SegmenterImpl implements Segmenter {
     return new ImageSessionImpl(this.#handle.engine, sessionId);
   }
 
-  /** @throws NotImplementedError — the video path lands in M2. */
+  /**
+   * Open a new video (memory-attention tracking) session (worker-side slot).
+   * Gate mirrors the public TSDoc on {@link Segmenter.createVideoSession}
+   * (docs/m2-internal-contracts.md §6.3): a tier with no video graphs at all,
+   * or unsupported on the resolved device, throws {@link UnsupportedDeviceError}
+   * here on the main thread — a tier that DOES advertise video support but
+   * whose manifest turns out to lack the video graph roles fails worker-side
+   * with {@link InvalidStateError} at `attachSource()` instead.
+   */
   async createVideoSession(): Promise<VideoSession> {
     this.#assertLive('createVideoSession');
-    throw new NotImplementedError('createVideoSession, lands in M2');
+    if (!this.#spec.supportsVideo || !this.#spec.devices[this.device]) {
+      throw new UnsupportedDeviceError(
+        `model '${this.#spec.id}' has no video (tracking) support on device '${this.device}'`,
+      );
+    }
+    const sessionId = await this.#handle.engine.createVideoSession();
+    return new VideoSessionImpl(this.#handle.engine, sessionId);
   }
 
   /**

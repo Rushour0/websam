@@ -26,12 +26,16 @@ import { WebGpuBackend } from '../backend/webgpu-backend.js';
 import { computeTransform, type CoordinateTransform } from '../coords.js';
 import { InvalidStateError } from '../errors.js';
 import type { LoadProgressEvent } from '../index.js';
+import type { ModelSpec } from '../registry.js';
 import { loadOrt } from '../runtime/ort-env.js';
+import type { Prompt } from '../segmenter.js';
+import { createWebCodecsFrameSource } from '../video/webcodecs-source.js';
 import { loadModelAssets } from '../weights/load-model-assets.js';
 import type {
   GraphManifestEntry,
   GraphRole,
   ModelManifest,
+  Quant,
   TensorSpec,
 } from '../weights/manifest.js';
 import { logitsToSourceMask } from './postprocess.js';
@@ -40,10 +44,15 @@ import type {
   DecodeRequest,
   EncodeResponse,
   MaskPayload,
+  PropagateRequest,
+  VideoObjectResult,
+  VideoSourceInfo,
   WorkerEngineApi,
   WorkerInitRequest,
   WorkerInitResult,
 } from './protocol.js';
+import { runPropagationPort } from './video/propagation-port.js';
+import { VideoEngine, type VideoEngineGraphs } from './video/video-engine.js';
 
 /** Graph roles the M1 image path loads. */
 const M1_ROLES: readonly GraphRole[] = ['visionEncoder', 'promptDecoder'];
@@ -73,6 +82,30 @@ interface EngineState {
   decoderEntry: GraphManifestEntry;
   encoder: BackendSession;
   decoder: BackendSession;
+  /** Retained so `createVideoSession`'s lazy graph load (§4/§5) can re-run `loadModelAssets`. */
+  spec: ModelSpec;
+  modelBaseUrl: string | undefined;
+  cache: boolean;
+  quantPreference: readonly Quant[];
+}
+
+/** Graph roles the M2 video path loads (§4.1); `noMemCondition` is conditional (§10 PIN-2). */
+const VIDEO_CORE_ROLES: readonly GraphRole[] = [
+  'videoEncoder',
+  'memoryAttention',
+  'maskDecoderVideo',
+  'memoryEncoder',
+];
+
+/** Compiled once per worker (shared by every video session) — mirrors the M1 encoder/decoder pattern. */
+interface VideoAssets {
+  manifest: ModelManifest;
+  graphs: VideoEngineGraphs;
+}
+
+interface VideoSessionSlot {
+  /** `undefined` until `attachVideoSource` succeeds (§6.1: source attaches once, worker-side mirror). */
+  videoEngine: VideoEngine | undefined;
 }
 
 /** Look up a semantic tensor key, failing loudly when the manifest lacks it. */
@@ -119,6 +152,12 @@ export class WorkerEngine implements WorkerEngineApi {
   #state: EngineState | undefined;
   #nextSessionId = 1;
   readonly #sessions = new Map<number, SessionSlot>();
+
+  // -- M2 video path (§4/§5/§6) ---------------------------------------------
+  #videoAssets: VideoAssets | undefined;
+  #videoAssetsLoading: Promise<VideoAssets> | undefined;
+  #nextVideoSessionId = 1;
+  readonly #videoSessions = new Map<number, VideoSessionSlot>();
 
   #requireState(method: string): EngineState {
     if (this.#disposed) {
@@ -228,6 +267,10 @@ export class WorkerEngine implements WorkerEngineApi {
         decoderEntry,
         encoder,
         decoder,
+        spec: req.spec,
+        modelBaseUrl: req.modelBaseUrl,
+        cache: req.cache,
+        quantPreference: req.quantPreference,
       };
       return { device: req.device, quant: assets.quant, totalBytes: assets.totalBytes };
     } catch (err) {
@@ -473,6 +516,217 @@ export class WorkerEngine implements WorkerEngineApi {
     this.#sessions.delete(sessionId);
   }
 
+  // ---------------------------------------------------------------------
+  // M2 video path (§4/§5/§6). CROSS-FILE NOTE (flagged for the
+  // orchestrator): `init()` above unconditionally requires M1_ROLES
+  // (`visionEncoder`/`promptDecoder`). If a video-only tier's manifest
+  // ships ONLY the four video roles (no M1-compatible image graphs),
+  // `init()` fails before any video RPC is ever reached — a tools/export
+  // manifest-shape concern (not a `src/` one) that pre-dates this file.
+  // ---------------------------------------------------------------------
+
+  #requireVideoSlot(sessionId: number): VideoSessionSlot {
+    const slot = this.#videoSessions.get(sessionId);
+    if (!slot) {
+      throw new InvalidStateError(`Unknown or closed worker video session id ${sessionId}`);
+    }
+    return slot;
+  }
+
+  #requireVideoEngine(sessionId: number, method: string): VideoEngine {
+    const slot = this.#requireVideoSlot(sessionId);
+    if (!slot.videoEngine) {
+      throw new InvalidStateError(`WorkerEngine.${method} called before attachVideoSource on session ${sessionId}`);
+    }
+    return slot.videoEngine;
+  }
+
+  /**
+   * Compile the four video graphs (+ `noMemCondition` when
+   * `video.initPath === 'noMemGraph'`, §10 PIN-2) ONCE per worker, shared by
+   * every video session — mirrors the M1 encoder/decoder compile-once
+   * pattern. Concurrent callers share the same in-flight load.
+   */
+  async #ensureVideoAssets(): Promise<VideoAssets> {
+    if (this.#videoAssets) return this.#videoAssets;
+    if (this.#videoAssetsLoading) return this.#videoAssetsLoading;
+
+    const state = this.#requireState('attachVideoSource');
+    const loading = (async (): Promise<VideoAssets> => {
+      const loadConfig = { modelBaseUrl: state.modelBaseUrl, cache: state.cache, quantPreference: state.quantPreference };
+      const core = await loadModelAssets(state.spec, { ...loadConfig, roles: VIDEO_CORE_ROLES });
+      const video = core.manifest.video;
+      if (!video) {
+        throw new InvalidStateError(`Model '${state.spec.id}' manifest ships no video graphs`);
+      }
+
+      let noMemBytes: Uint8Array | undefined;
+      if (video.initPath === 'noMemGraph') {
+        const extra = await loadModelAssets(state.spec, { ...loadConfig, roles: ['noMemCondition'] });
+        noMemBytes = extra.graphs.get('noMemCondition');
+        if (!noMemBytes) {
+          throw new InvalidStateError(`Model '${state.spec.id}' manifest.video.initPath is 'noMemGraph' but ships no 'noMemCondition' graph`);
+        }
+      }
+
+      // §4.5 IOBindingPlan: persistent-loop outputs stay 'device' on webgpu;
+      // maskLogits/iouScores/objectPointer/objectScoreLogits come back 'cpu'.
+      const hotLocation = state.device === 'webgpu' ? 'device' : 'cpu';
+      const deviceOutputs = (entry: GraphManifestEntry, keys: readonly string[]): IOBindingPlan => {
+        const plan: IOBindingPlan = { outputLocations: {} };
+        for (const key of keys) {
+          const spec = entry.outputs[key];
+          if (spec) plan.outputLocations[spec.name] = hotLocation;
+        }
+        return plan;
+      };
+      const cpuOutputs = (entry: GraphManifestEntry, keys: readonly string[]): IOBindingPlan => {
+        const plan: IOBindingPlan = { outputLocations: {} };
+        for (const key of keys) {
+          const spec = entry.outputs[key];
+          if (spec) plan.outputLocations[spec.name] = 'cpu';
+        }
+        return plan;
+      };
+
+      const bytesFor = (role: GraphRole): Uint8Array => {
+        const bytes = core.graphs.get(role);
+        if (!bytes) throw new InvalidStateError(`loadModelAssets did not return bytes for '${role}'`);
+        return bytes;
+      };
+      const entryFor = (role: GraphRole): GraphManifestEntry => {
+        const entry = core.manifest.graphs[role];
+        if (!entry) throw new InvalidStateError(`Video manifest is missing graph role '${role}'`);
+        return entry;
+      };
+
+      const videoEncoderEntry = entryFor('videoEncoder');
+      const memoryAttentionEntry = entryFor('memoryAttention');
+      const maskDecoderEntry = entryFor('maskDecoderVideo');
+      const memoryEncoderEntry = entryFor('memoryEncoder');
+
+      const videoEncoder = await state.backend.createSession(
+        { name: 'videoEncoder', bytes: bytesFor('videoEncoder') },
+        deviceOutputs(videoEncoderEntry, ['visionFeatures', 'visionPos', 'highRes0', 'highRes1']),
+      );
+      const memoryAttention = await state.backend.createSession(
+        { name: 'memoryAttention', bytes: bytesFor('memoryAttention') },
+        deviceOutputs(memoryAttentionEntry, ['conditionedFeatures']),
+      );
+      const maskDecoderVideo = await state.backend.createSession(
+        { name: 'maskDecoderVideo', bytes: bytesFor('maskDecoderVideo') },
+        cpuOutputs(maskDecoderEntry, ['maskLogits', 'iouScores', 'objectPointer', 'objectScoreLogits']),
+      );
+      const memoryEncoder = await state.backend.createSession(
+        { name: 'memoryEncoder', bytes: bytesFor('memoryEncoder') },
+        deviceOutputs(memoryEncoderEntry, ['memoryFeatures', 'memoryPos']),
+      );
+      const noMemCondition = noMemBytes
+        ? await state.backend.createSession(
+            { name: 'noMemCondition', bytes: noMemBytes },
+            deviceOutputs(entryFor('noMemCondition'), ['conditionedFeatures']),
+          )
+        : undefined;
+
+      const graphs: VideoEngineGraphs = { videoEncoder, memoryAttention, maskDecoderVideo, memoryEncoder, noMemCondition };
+      this.#videoAssets = { manifest: core.manifest, graphs };
+      return this.#videoAssets;
+    })();
+    this.#videoAssetsLoading = loading;
+    try {
+      return await loading;
+    } finally {
+      this.#videoAssetsLoading = undefined;
+    }
+  }
+
+  /** Open a video session slot (cheap: video graphs load lazily, on `attachVideoSource`). */
+  async createVideoSession(): Promise<number> {
+    this.#requireState('createVideoSession');
+    const id = this.#nextVideoSessionId++;
+    this.#videoSessions.set(id, { videoEngine: undefined });
+    return id;
+  }
+
+  /**
+   * Demux `source` (a structured-clone-by-reference Blob) and attach it to
+   * the session's {@link VideoEngine}, lazily compiling the shared video
+   * graphs on first use. Per §6.1 this is where an unsupported/video-less
+   * manifest surfaces as `InvalidStateError` — NOT at `createVideoSession`.
+   */
+  async attachVideoSource(sessionId: number, source: Blob): Promise<VideoSourceInfo> {
+    const state = this.#requireState('attachVideoSource');
+    const slot = this.#requireVideoSlot(sessionId);
+    if (slot.videoEngine) {
+      throw new InvalidStateError(`VideoEngine on session ${sessionId} already has a source attached`);
+    }
+    const assets = await this.#ensureVideoAssets();
+    const frameSource = await createWebCodecsFrameSource(source);
+    const videoEngine = new VideoEngine({
+      backend: state.backend,
+      manifest: assets.manifest,
+      spec: state.spec,
+      graphs: assets.graphs,
+    });
+    videoEngine.attach(frameSource);
+    slot.videoEngine = videoEngine;
+    return frameSource.info;
+  }
+
+  async addVideoObject(
+    sessionId: number,
+    req: { frameIndex: number; prompts: Prompt[]; objectId?: number; epoch: number },
+  ): Promise<VideoObjectResult> {
+    const engine = this.#requireVideoEngine(sessionId, 'addVideoObject');
+    const { objectId, mask } = await engine.addObject(req);
+    return Comlink.transfer({ objectId, epoch: req.epoch, mask }, [mask.binaryMask]);
+  }
+
+  async refineVideoObject(
+    sessionId: number,
+    req: { objectId: number; frameIndex: number; prompts: Prompt[]; epoch: number },
+  ): Promise<VideoObjectResult> {
+    const engine = this.#requireVideoEngine(sessionId, 'refineVideoObject');
+    const mask = await engine.refineObject(req);
+    return Comlink.transfer({ objectId: req.objectId, epoch: req.epoch, mask }, [mask.binaryMask]);
+  }
+
+  async removeVideoObject(sessionId: number, objectId: number): Promise<void> {
+    const engine = this.#requireVideoEngine(sessionId, 'removeVideoObject');
+    engine.removeObject(objectId);
+  }
+
+  /**
+   * Starts the pull-credit propagation loop on `port` (§5.2) and resolves
+   * once it is SCHEDULED — `runPropagationPort` drives the loop
+   * fire-and-forget from here on, reporting `frame`/`done`/`error` over the
+   * port until it closes.
+   */
+  async propagateVideo(sessionId: number, req: PropagateRequest, port: MessagePort): Promise<void> {
+    const engine = this.#requireVideoEngine(sessionId, 'propagateVideo');
+    runPropagationPort(port, (emit, isCancelled) =>
+      engine.propagate({ startFrame: req.startFrame, endFrame: req.endFrame, epoch: req.epoch }, emit, isCancelled),
+    );
+  }
+
+  async resetVideoSession(sessionId: number): Promise<void> {
+    const slot = this.#requireVideoSlot(sessionId);
+    slot.videoEngine?.reset();
+  }
+
+  async closeVideoSession(sessionId: number): Promise<void> {
+    const slot = this.#videoSessions.get(sessionId);
+    if (!slot) return; // idempotent, mirrors closeSession
+    if (slot.videoEngine) await slot.videoEngine.dispose();
+    this.#videoSessions.delete(sessionId);
+  }
+
+  /** Debug-only passthrough to `Backend.debugStats()` for the browser e2e flatness gate (§9.3). */
+  debugStats(sessionId: number): { liveTensors: number; liveBytes: number } | undefined {
+    this.#requireVideoSlot(sessionId);
+    return this.#state?.backend.debugStats?.();
+  }
+
   /**
    * Release every session slot and the backend (which sweeps its compiled
    * sessions and tracked tensors). Idempotent — the main thread terminates
@@ -485,6 +739,11 @@ export class WorkerEngine implements WorkerEngineApi {
       disposeEmbeddings(slot);
     }
     this.#sessions.clear();
+    for (const slot of this.#videoSessions.values()) {
+      if (slot.videoEngine) await slot.videoEngine.dispose().catch(() => undefined);
+    }
+    this.#videoSessions.clear();
+    this.#videoAssets = undefined;
     const state = this.#state;
     this.#state = undefined;
     if (state) {

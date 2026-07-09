@@ -90,20 +90,27 @@ export function zeroPadRegions(chw: Float32Array, transform: CoordinateTransform
 }
 
 /**
- * Resize a bitmap into the model square via OffscreenCanvas and produce the
- * normalized CHW Float32 tensor the vision encoder eats.
+ * Resize a bitmap (or decoded video frame) into the model square via
+ * OffscreenCanvas and produce the normalized CHW Float32 tensor the vision
+ * encoder eats. `VideoFrame` support is the M2 video path (EdgeTAM 1024
+ * square-stretch + ImageNet mean/std, both carried by `preprocess` — never a
+ * TS constant, per the model-agnostic rule); `CanvasImageSource` accepts a
+ * `VideoFrame` directly, so the only change from the M1 image path is the
+ * widened parameter type.
  *
  * The caller keeps ownership of `bitmap` (the engine closes it — worker owns
- * it post-transfer, §3.4). Requires a worker/browser context; throws
- * {@link InvalidStateError} where `OffscreenCanvas` does not exist.
+ * it post-transfer, §3.4; for `VideoFrame` the video engine closes it after
+ * preprocess per the M2 per-frame lifecycle). Requires a worker/browser
+ * context; throws {@link InvalidStateError} where `OffscreenCanvas` does not
+ * exist.
  *
- * @param bitmap - Decoded source image.
- * @param transform - The session transform (already computed from the bitmap
+ * @param bitmap - Decoded source image or video frame.
+ * @param transform - The session transform (already computed from the source
  * dims + `preprocess.mode`/`inputSize` by the engine).
  * @param preprocess - Manifest preprocessing block (mean/std, size).
  */
 export function bitmapToTensor(
-  bitmap: ImageBitmap,
+  bitmap: ImageBitmap | VideoFrame,
   transform: CoordinateTransform,
   preprocess: PreprocessSpec,
 ): Float32Array {

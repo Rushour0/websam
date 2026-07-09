@@ -1,11 +1,39 @@
 import { describe, expect, it, vi } from 'vitest';
-import { InvalidStateError, NotImplementedError, UnsupportedDeviceError } from '../errors.js';
+import { InvalidStateError, UnsupportedDeviceError } from '../errors.js';
 import type { LoadProgressEvent, SegmenterConfig } from '../index.js';
 import { registerModel, type ModelSpec } from '../registry.js';
 import type { WorkerInitRequest, WorkerInitResult } from '../worker/protocol.js';
 import { ImageSessionImpl } from './image-session.js';
 import { createSegmenterImpl } from './segmenter-impl.js';
 import type { RemoteEngine, WorkerHandle } from './spawn-worker.js';
+import { VideoSessionImpl } from './video-session.js';
+
+/** Video RPC stubs for the M1/image-path tests that don't exercise them. */
+function videoStubs(): Pick<
+  RemoteEngine,
+  | 'createVideoSession'
+  | 'attachVideoSource'
+  | 'addVideoObject'
+  | 'refineVideoObject'
+  | 'removeVideoObject'
+  | 'propagateVideo'
+  | 'resetVideoSession'
+  | 'closeVideoSession'
+> {
+  const nope = async (): Promise<never> => {
+    throw new Error('video RPC: not under test');
+  };
+  return {
+    createVideoSession: vi.fn(nope),
+    attachVideoSource: vi.fn(nope),
+    addVideoObject: vi.fn(nope),
+    refineVideoObject: vi.fn(nope),
+    removeVideoObject: vi.fn(nope),
+    propagateVideo: vi.fn(nope),
+    resetVideoSession: vi.fn(nope),
+    closeVideoSession: vi.fn(nope),
+  };
+}
 
 // Node has WebAssembly and no navigator.gpu, so the main-thread probes
 // resolve `device: 'auto'` to 'wasm' with quantPreference ['int8', 'fp32'].
@@ -34,8 +62,21 @@ const WEBGPU_ONLY_TIER: ModelSpec = {
   devices: { webgpu: true, wasm: false },
 };
 
+/** A wasm-resolvable, permissive tier that DOES advertise video support. */
+const VIDEO_TIER: ModelSpec = {
+  id: 'test-video-tier',
+  displayName: 'Test tier (video, wasm ok)',
+  arch: 'edgetam',
+  inputSize: 64,
+  supportsVideo: true,
+  license: 'apache-2.0',
+  manifestUrl: 'https://models.invalid/test-video-tier/manifest.json',
+  devices: { webgpu: true, wasm: true },
+};
+
 registerModel(WASM_TIER);
 registerModel(WEBGPU_ONLY_TIER);
+registerModel(VIDEO_TIER);
 
 const INIT_RESULT: WorkerInitResult = { device: 'wasm', quant: 'int8', totalBytes: 4096 };
 
@@ -56,6 +97,7 @@ function fakeWorker(engineOverrides: Partial<RemoteEngine> = {}): FakeWorker {
     decode: vi.fn(async () => []),
     closeSession: vi.fn(async () => {}),
     dispose: vi.fn(async () => {}),
+    ...videoStubs(),
     ...engineOverrides,
   };
   const terminate = vi.fn();
@@ -98,19 +140,23 @@ describe('createSegmenterImpl — config validation', () => {
 });
 
 describe('createSegmenterImpl — registry default + license gate', () => {
-  it("defaults to 'sam3-tracker' and gates it on acceptLicense (InvalidStateError names the key)", async () => {
-    // sam3-tracker requiresLicenseAcceptance, so the default-model path is
-    // observable through the license rejection itself.
-    const rejection = expect(createSegmenterImpl({})).rejects;
-    await rejection.toThrow(InvalidStateError);
-    await expect(createSegmenterImpl({})).rejects.toThrow(/sam3-tracker/);
-    await expect(createSegmenterImpl({})).rejects.toThrow(/acceptLicense/);
+  it("defaults to 'edgetam' (permissive, wasm-capable) — no license gate", async () => {
+    // DEFAULT_MODEL_ID flipped to the Apache-2.0 EdgeTAM tier at M2; the default
+    // path resolves on node's wasm device with no acceptLicense required.
+    const worker = fakeWorker();
+    const segmenter = await createSegmenterImpl({}, { spawnWorker: worker.spawn });
+    expect(segmenter.model.spec.id).toBe('edgetam');
+  });
+
+  it('license-gated tier (sam3-tracker) rejects without acceptLicense (InvalidStateError names the key)', async () => {
+    await expect(createSegmenterImpl({ model: 'sam3-tracker' })).rejects.toThrow(InvalidStateError);
+    await expect(createSegmenterImpl({ model: 'sam3-tracker' })).rejects.toThrow(/acceptLicense/);
   });
 
   it('license-gated tier + acceptLicense passes the gate (fails later on device support)', async () => {
     // sam3-tracker is webgpu-only; node resolves wasm — so passing the license
     // gate surfaces as the UnsupportedDeviceError cross-check, not a license error.
-    await expect(createSegmenterImpl({ acceptLicense: 'sam' })).rejects.toThrow(
+    await expect(createSegmenterImpl({ model: 'sam3-tracker', acceptLicense: 'sam' })).rejects.toThrow(
       UnsupportedDeviceError,
     );
   });
@@ -204,10 +250,18 @@ describe('Segmenter facade', () => {
     expect(worker.engine.createSession).toHaveBeenCalledOnce();
   });
 
-  it('createVideoSession rejects NotImplementedError (lands in M2)', async () => {
+  it('createVideoSession returns a VideoSessionImpl on a video-capable tier', async () => {
+    const worker = fakeWorker({ createVideoSession: vi.fn(async () => 42) });
+    const segmenter = await create({ model: VIDEO_TIER.id }, worker);
+    const session = await segmenter.createVideoSession();
+    expect(session).toBeInstanceOf(VideoSessionImpl);
+    expect(worker.engine.createVideoSession).toHaveBeenCalledOnce();
+  });
+
+  it('createVideoSession throws UnsupportedDeviceError on an image-only tier', async () => {
+    // WASM_TIER has supportsVideo: false.
     const segmenter = await create();
-    await expect(segmenter.createVideoSession()).rejects.toThrow(NotImplementedError);
-    await expect(segmenter.createVideoSession()).rejects.toThrow(/M2/);
+    await expect(segmenter.createVideoSession()).rejects.toThrow(UnsupportedDeviceError);
   });
 
   it('dispose chains engine.dispose → worker.terminate, in that order', async () => {
