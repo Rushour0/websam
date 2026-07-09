@@ -4,7 +4,8 @@ Exports all five EdgeTAM graphs (`vision_encoder`, `no_mem_embed`,
 `memory_attention`, `mask_decoder_video`, `memory_encoder`) with the
 SEPARATED (JS-fed) `memory_attention` / low-res-mask `memory_encoder`
 interfaces (see `wrappers/edgetam.py` "INTERFACE RECONCILIATION" docstrings),
-converts every graph to fp16, and writes a browser-compatible schemaVersion-1
+keeps the fp32 source AND converts every graph to fp16 (both survive on
+disk, self-contained), and writes a browser-compatible schemaVersion-1
 manifest (`packages/core/src/weights/manifest.ts` shape) with the CORRECTED
 EdgeTAM constants from `tools/export/spikes/m2-edgetam/FINDINGS.md`:
 512 tokens/map, kvLen 3648, 1 cond + 6 recent, ImageNet mean/std, no
@@ -17,9 +18,15 @@ gotchas 1-2): `memory_encoder` skips both `ONNXProgram.optimize()` and
 Usage:
     cd tools/export && uv run --extra export python -m websam_export.export_edgetam [--out DIR] [graph ...]
 
-Produces (under `--out`, default `dist/edgetam/`):
-    vision_encoder.onnx, no_mem_embed.onnx, memory_attention.onnx,
-    mask_decoder_video.onnx, memory_encoder.onnx   (all fp16, self-contained)
+Produces (under `--out`, default `dist/edgetam/`), fp32 AND fp16 per graph
+(both self-contained; fp32 is the pre-conversion source, exact, and is what
+onnxruntime-web's wasm device loads — fp16 is a CPU-execution-provider trap
+there):
+    vision_encoder.onnx / vision_encoder_fp16.onnx
+    no_mem_embed.onnx / no_mem_embed_fp16.onnx
+    memory_attention.onnx / memory_attention_fp16.onnx
+    mask_decoder_video.onnx / mask_decoder_video_fp16.onnx
+    memory_encoder.onnx / memory_encoder_fp16.onnx
     manifest.json                                  (tier 'edgetam')
 """
 
@@ -281,8 +288,11 @@ def export_all(out_dir: pathlib.Path, names: list[str] | None = None) -> dict[st
                 ("pointer_deltas", onnx.TensorProto.INT64, (1, MAX_OBJECT_POINTERS)),
                 ("pointer_mask", onnx.TensorProto.BOOL, (1, MAX_OBJECT_POINTERS)),
             ])
-        convert_to_fp16(out_dir / f"{name}.onnx")
-        results[name] = {"export_mode": mode, "dtype": "float16"}
+        fp32_path = out_dir / f"{name}.onnx"
+        fp16_path = out_dir / f"{name}_fp16.onnx"
+        fp16_path.write_bytes(fp32_path.read_bytes())
+        convert_to_fp16(fp16_path)
+        results[name] = {"export_mode": mode, "dtype": ["float32", "float16"]}
     return results
 
 

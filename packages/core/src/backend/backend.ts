@@ -153,6 +153,15 @@ export interface Backend {
   copyRegion(src: DeviceTensor, dst: DeviceTensor, slotIndex: number): void;
 
   /**
+   * Zero-copy reshape VIEW of `tensor` with new `shape` (element count must
+   * match). Shares the source's storage; disposing the returned view does NOT
+   * free it (the source remains the owner). The video engine uses this to feed
+   * the ring buffer `[M,T,C]` to a graph input declared batch-first
+   * `[1,M,T,C]` without a copy.
+   */
+  reshape(tensor: DeviceTensor, shape: readonly number[]): DeviceTensor;
+
+  /**
    * Explicit device→CPU crossing. The only sanctioned way to observe tensor
    * bytes; typed-array view matches the tensor's {@link DType}
    * (`float16` reads back as a `Uint16Array` of raw half bits).

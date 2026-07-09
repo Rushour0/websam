@@ -32,7 +32,8 @@
   "scripts": {
     "build": "tsdown",
     "test": "vitest run --project unit",
-    "test:browser": "vitest run --project browser"
+    "test:browser": "vitest run --project browser",
+    "test:e2e": "vitest run --project e2e"
   },
   "dependencies": {
     "comlink": "^4.4.2",

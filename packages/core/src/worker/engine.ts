@@ -78,10 +78,15 @@ interface EngineState {
   device: 'webgpu' | 'wasm';
   backend: Backend;
   manifest: ModelManifest;
-  encoderEntry: GraphManifestEntry;
-  decoderEntry: GraphManifestEntry;
-  encoder: BackendSession;
-  decoder: BackendSession;
+  /**
+   * The M1 image-path graphs — `undefined` for a video-only tier whose
+   * manifest ships no `visionEncoder`/`promptDecoder` roles (e.g. EdgeTAM).
+   * `encodeImage`/`decode` guard on these; the video path never touches them.
+   */
+  encoderEntry: GraphManifestEntry | undefined;
+  decoderEntry: GraphManifestEntry | undefined;
+  encoder: BackendSession | undefined;
+  decoder: BackendSession | undefined;
   /** Retained so `createVideoSession`'s lazy graph load (§4/§5) can re-run `loadModelAssets`. */
   spec: ModelSpec;
   modelBaseUrl: string | undefined;
@@ -178,6 +183,33 @@ export class WorkerEngine implements WorkerEngineApi {
   }
 
   /**
+   * Narrow to the image-path graphs, or fail loudly on a video-only tier whose
+   * manifest ships no `visionEncoder`/`promptDecoder` roles.
+   */
+  #requireImagePath(
+    state: EngineState,
+    method: string,
+  ): {
+    encoder: BackendSession;
+    decoder: BackendSession;
+    encoderEntry: GraphManifestEntry;
+    decoderEntry: GraphManifestEntry;
+  } {
+    if (!state.encoder || !state.decoder || !state.encoderEntry || !state.decoderEntry) {
+      throw new InvalidStateError(
+        `WorkerEngine.${method}: model '${state.spec.id}' has no image path ` +
+          `(its manifest ships only video graphs); use a video session instead`,
+      );
+    }
+    return {
+      encoder: state.encoder,
+      decoder: state.decoder,
+      encoderEntry: state.encoderEntry,
+      decoderEntry: state.decoderEntry,
+    };
+  }
+
+  /**
    * Boot ort, init the backend for `req.device`, run the whole weight
    * pipeline in the worker, and compile encoder + decoder sessions.
    *
@@ -209,60 +241,78 @@ export class WorkerEngine implements WorkerEngineApi {
       req.device === 'webgpu' ? new WebGpuBackend(ort) : new WasmBackend(ort);
     await backend.init();
 
+    const loadConfig = {
+      modelBaseUrl: req.modelBaseUrl,
+      cache: req.cache,
+      quantPreference: req.quantPreference,
+    };
+
     try {
-      const assets = await loadModelAssets(
-        req.spec,
-        {
-          modelBaseUrl: req.modelBaseUrl,
-          cache: req.cache,
-          quantPreference: req.quantPreference,
-          roles: M1_ROLES,
-        },
-        progress,
-      );
+      // Fetch the manifest WITHOUT requiring the M1 image roles, so a
+      // video-only tier (whose manifest ships only video graphs, e.g. EdgeTAM)
+      // can init and reach the video path. The image graphs are compiled here
+      // only when the tier actually declares them; video graphs always load
+      // lazily on `attachVideoSource`.
+      const base = await loadModelAssets(req.spec, { ...loadConfig, roles: [] }, progress);
+      const manifest = base.manifest;
+      const hasImagePath =
+        manifest.graphs['visionEncoder'] !== undefined &&
+        manifest.graphs['promptDecoder'] !== undefined;
 
-      const encoderEntry = assets.manifest.graphs['visionEncoder'];
-      const decoderEntry = assets.manifest.graphs['promptDecoder'];
-      const encoderBytes = assets.graphs.get('visionEncoder');
-      const decoderBytes = assets.graphs.get('promptDecoder');
-      if (!encoderEntry || !decoderEntry || !encoderBytes || !decoderBytes) {
-        // Unreachable in practice: loadModelAssets validates the roles.
-        throw new InvalidStateError(
-          `Model '${req.spec.id}' assets are missing a required M1 graph role`,
+      let encoderEntry: GraphManifestEntry | undefined;
+      let decoderEntry: GraphManifestEntry | undefined;
+      let encoder: BackendSession | undefined;
+      let decoder: BackendSession | undefined;
+      let quant = base.quant;
+      let totalBytes = base.totalBytes;
+
+      if (hasImagePath) {
+        const assets = await loadModelAssets(req.spec, { ...loadConfig, roles: M1_ROLES }, progress);
+        encoderEntry = assets.manifest.graphs['visionEncoder'];
+        decoderEntry = assets.manifest.graphs['promptDecoder'];
+        const encoderBytes = assets.graphs.get('visionEncoder');
+        const decoderBytes = assets.graphs.get('promptDecoder');
+        if (!encoderEntry || !decoderEntry || !encoderBytes || !decoderBytes) {
+          // Unreachable in practice: loadModelAssets validates the roles.
+          throw new InvalidStateError(
+            `Model '${req.spec.id}' assets are missing a required M1 graph role`,
+          );
+        }
+
+        // §2.4: webgpu keeps the embeddings device-resident for copy-free
+        // decoder feeds; wasm is all-cpu (its sessions ignore the plan anyway).
+        const embedLocation = req.device === 'webgpu' ? 'device' : 'cpu';
+        const encoderPlan: IOBindingPlan = { outputLocations: {} };
+        for (const key of EMBED_KEYS) {
+          const spec = requireTensorSpec(encoderEntry.outputs, key, 'visionEncoder.outputs');
+          encoderPlan.outputLocations[spec.name] = embedLocation;
+        }
+        const decoderPlan: IOBindingPlan = { outputLocations: {} };
+        for (const key of ['iouScores', 'maskLogits', 'objectScoreLogits']) {
+          // objectScoreLogits present-or-not is manifest business; only pin
+          // locations for outputs the manifest declares.
+          const spec = decoderEntry.outputs[key];
+          if (spec) decoderPlan.outputLocations[spec.name] = 'cpu';
+        }
+
+        progress?.({ phase: 'compile', file: 'visionEncoder' });
+        encoder = await backend.createSession(
+          { name: 'visionEncoder', bytes: encoderBytes },
+          encoderPlan,
         );
+        progress?.({ phase: 'compile', file: 'promptDecoder' });
+        decoder = await backend.createSession(
+          { name: 'promptDecoder', bytes: decoderBytes },
+          decoderPlan,
+        );
+        quant = assets.quant;
+        totalBytes = assets.totalBytes;
       }
-
-      // §2.4: webgpu keeps the embeddings device-resident for copy-free
-      // decoder feeds; wasm is all-cpu (its sessions ignore the plan anyway).
-      const embedLocation = req.device === 'webgpu' ? 'device' : 'cpu';
-      const encoderPlan: IOBindingPlan = { outputLocations: {} };
-      for (const key of EMBED_KEYS) {
-        const spec = requireTensorSpec(encoderEntry.outputs, key, 'visionEncoder.outputs');
-        encoderPlan.outputLocations[spec.name] = embedLocation;
-      }
-      const decoderPlan: IOBindingPlan = { outputLocations: {} };
-      for (const key of ['iouScores', 'maskLogits', 'objectScoreLogits']) {
-        // objectScoreLogits present-or-not is manifest business; only pin
-        // locations for outputs the manifest declares.
-        const spec = decoderEntry.outputs[key];
-        if (spec) decoderPlan.outputLocations[spec.name] = 'cpu';
-      }
-
-      progress?.({ phase: 'compile', file: 'visionEncoder' });
-      const encoder = await backend.createSession(
-        { name: 'visionEncoder', bytes: encoderBytes },
-        encoderPlan,
-      );
-      progress?.({ phase: 'compile', file: 'promptDecoder' });
-      const decoder = await backend.createSession(
-        { name: 'promptDecoder', bytes: decoderBytes },
-        decoderPlan,
-      );
 
       this.#state = {
         device: req.device,
         backend,
-        manifest: assets.manifest,
+        manifest,
         encoderEntry,
         decoderEntry,
         encoder,
@@ -272,7 +322,7 @@ export class WorkerEngine implements WorkerEngineApi {
         cache: req.cache,
         quantPreference: req.quantPreference,
       };
-      return { device: req.device, quant: assets.quant, totalBytes: assets.totalBytes };
+      return { device: req.device, quant, totalBytes };
     } catch (err) {
       // Leave nothing device-resident behind a failed init; the engine stays
       // unusable (init is once-only) and the main thread terminates the worker.
@@ -297,6 +347,7 @@ export class WorkerEngine implements WorkerEngineApi {
    */
   async encodeImage(sessionId: number, bitmap: ImageBitmap): Promise<EncodeResponse> {
     const state = this.#requireState('encodeImage');
+    const { encoder, encoderEntry } = this.#requireImagePath(state, 'encodeImage');
     const slot = this.#requireSlot(sessionId);
     const preprocess = state.manifest.preprocess;
     const width = bitmap.width;
@@ -311,7 +362,7 @@ export class WorkerEngine implements WorkerEngineApi {
       bitmap.close();
     }
 
-    const pixelsSpec = requireTensorSpec(state.encoderEntry.inputs, 'pixels', 'visionEncoder.inputs');
+    const pixelsSpec = requireTensorSpec(encoderEntry.inputs, 'pixels', 'visionEncoder.inputs');
     assertDtype(pixelsSpec, 'float32', 'encodeImage');
     const pixels = state.backend.uploadTensor(
       chw,
@@ -320,7 +371,7 @@ export class WorkerEngine implements WorkerEngineApi {
     );
     let outputs: Record<string, DeviceTensor>;
     try {
-      outputs = await state.encoder.run({ [pixelsSpec.name]: pixels });
+      outputs = await encoder.run({ [pixelsSpec.name]: pixels });
     } finally {
       pixels.dispose();
     }
@@ -328,7 +379,7 @@ export class WorkerEngine implements WorkerEngineApi {
     const embeddings = new Map<string, DeviceTensor>();
     const kept = new Set<string>();
     for (const key of EMBED_KEYS) {
-      const spec = requireTensorSpec(state.encoderEntry.outputs, key, 'visionEncoder.outputs');
+      const spec = requireTensorSpec(encoderEntry.outputs, key, 'visionEncoder.outputs');
       const tensor = outputs[spec.name];
       if (!tensor) {
         throw new InvalidStateError(
@@ -355,6 +406,7 @@ export class WorkerEngine implements WorkerEngineApi {
    */
   async decode(sessionId: number, req: DecodeRequest): Promise<MaskPayload[]> {
     const state = this.#requireState('decode');
+    const { decoder, decoderEntry } = this.#requireImagePath(state, 'decode');
     const slot = this.#requireSlot(sessionId);
     const encoded = slot.encoded;
     if (!encoded) {
@@ -367,7 +419,7 @@ export class WorkerEngine implements WorkerEngineApi {
     }
 
     const prompts = buildPromptTensors(req.prompts, encoded.transform);
-    const inputs = state.decoderEntry.inputs;
+    const inputs = decoderEntry.inputs;
     const feeds: Record<string, DeviceTensor> = {};
     const scratch: DeviceTensor[] = [];
     try {
@@ -419,7 +471,7 @@ export class WorkerEngine implements WorkerEngineApi {
         feeds[spec.name] = tensor;
       }
 
-      const outputs = await state.decoder.run(feeds);
+      const outputs = await decoder.run(feeds);
       try {
         return await this.#selectMasks(state, encoded, req, outputs);
       } finally {
@@ -441,8 +493,9 @@ export class WorkerEngine implements WorkerEngineApi {
     req: DecodeRequest,
     outputs: Record<string, DeviceTensor>,
   ): Promise<MaskPayload[]> {
-    const iouSpec = requireTensorSpec(state.decoderEntry.outputs, 'iouScores', 'promptDecoder.outputs');
-    const maskSpec = requireTensorSpec(state.decoderEntry.outputs, 'maskLogits', 'promptDecoder.outputs');
+    const { decoderEntry } = this.#requireImagePath(state, 'decode');
+    const iouSpec = requireTensorSpec(decoderEntry.outputs, 'iouScores', 'promptDecoder.outputs');
+    const maskSpec = requireTensorSpec(decoderEntry.outputs, 'maskLogits', 'promptDecoder.outputs');
     const iouTensor = outputs[iouSpec.name];
     const maskTensor = outputs[maskSpec.name];
     if (!iouTensor || !maskTensor) {

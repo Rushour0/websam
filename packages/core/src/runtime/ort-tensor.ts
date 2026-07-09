@@ -128,6 +128,43 @@ export function createCpuTensor(
 }
 
 /**
+ * Zero-copy reshape VIEW of `tensor`: a new {@link DeviceTensor} over the same
+ * underlying storage with different `dims` (element count must match). Used to
+ * present the memory-bank ring `[M,T,C]` as the `[1,M,T,C]` batch-first shape
+ * the memory-attention graph declares, without copying.
+ *
+ * The view shares the source's data/GPU buffer; disposing the view does NOT
+ * free that storage (a CPU tensor dispose is a no-op; `fromGpuBuffer` does not
+ * own the buffer). The source tensor remains the owner.
+ */
+export function reshapeOrtView(
+  ort: OrtModule,
+  tensor: DeviceTensor,
+  shape: readonly number[],
+): OrtDeviceTensor {
+  const src = (tensor as OrtDeviceTensor).ortTensor;
+  const want = shape.reduce((a, b) => a * b, 1);
+  const have = src.dims.reduce((a, b) => a * b, 1);
+  if (want !== have) {
+    throw new InvalidStateError(
+      `reshape: element count ${want} ([${shape.join(',')}]) != source ${have} ([${src.dims.join(',')}])`,
+    );
+  }
+  const dtype = src.type as DType;
+  if (src.location === 'gpu-buffer') {
+    const buffer = (src as unknown as { gpuBuffer: unknown }).gpuBuffer;
+    const fromGpuBuffer = (
+      ort.Tensor as unknown as {
+        fromGpuBuffer(b: unknown, opts: { dataType: DType; dims: readonly number[] }): OrtTensor;
+      }
+    ).fromGpuBuffer;
+    return OrtDeviceTensor.wrap(fromGpuBuffer(buffer, { dataType: dtype, dims: shape }));
+  }
+  const Tensor = ort.Tensor as unknown as CpuTensorCtor;
+  return OrtDeviceTensor.wrap(new Tensor(dtype, src.data as ArrayBufferView, shape));
+}
+
+/**
  * Build a zeroed `'cpu'`-located tensor (the shared body of
  * `Backend.allocTensor` for `location: 'cpu'`).
  *

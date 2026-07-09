@@ -9,3 +9,9 @@ declare module '*.png?url' {
   const url: string;
   export default url;
 }
+
+/** Same rationale, for the M2 video golden gate's committed MP4 clip. */
+declare module '*.mp4?url' {
+  const url: string;
+  export default url;
+}

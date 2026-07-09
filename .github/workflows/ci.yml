@@ -61,7 +61,8 @@ jobs:
         run: pnpm build
 
       - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
+        # pnpm exec (not npx): the workspace's playwright binary isn't on npx's PATH.
+        run: pnpm --filter @websam/core exec playwright install --with-deps chromium
 
       # xvfb is required: SwiftShader WebGPU needs a display server;
       # plain headless Chromium exposes no WebGPU adapter.

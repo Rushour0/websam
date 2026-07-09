@@ -1,8 +1,11 @@
 name: Release
 
+# Manual-only until first publish (M4): the packages are pre-alpha 0.0.0 and
+# the @websam npm scope isn't claimed yet, so auto-publish on push 404s. Once
+# the scope is claimed and trusted publishing is configured, switch this back
+# to `push: branches: [main]`.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 concurrency: release-${{ github.ref }}
 

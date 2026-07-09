@@ -370,10 +370,20 @@ export class VideoEngine {
       const queriesPosSpec = requireTensorSpec(inputs, 'queriesPos', 'memoryAttention.inputs');
       feeds[queriesPosSpec.name] = visionPos;
 
+      // The bank ring is `[M,T,C]`; the graph declares `memory_spatial`
+      // batch-first `[1,M,T,C]`. Feed a zero-copy `[1,...]` view (disposed via
+      // scratch; the bank still owns the underlying ring storage).
       const spatialSpec = requireTensorSpec(inputs, 'memorySpatial', 'memoryAttention.inputs');
-      feeds[spatialSpec.name] = asm.memorySpatial;
+      const spatialView = this.#backend.reshape(asm.memorySpatial, [1, ...asm.memorySpatial.shape]);
+      scratch.push(spatialView);
+      feeds[spatialSpec.name] = spatialView;
       const spatialPosSpec = requireTensorSpec(inputs, 'memorySpatialPos', 'memoryAttention.inputs');
-      feeds[spatialPosSpec.name] = asm.memorySpatialPos;
+      const spatialPosView = this.#backend.reshape(asm.memorySpatialPos, [
+        1,
+        ...asm.memorySpatialPos.shape,
+      ]);
+      scratch.push(spatialPosView);
+      feeds[spatialPosSpec.name] = spatialPosView;
 
       if (this.#video.tposDelivery === 'indices') {
         const spec = requireTensorSpec(inputs, 'tposIndices', 'memoryAttention.inputs');
@@ -438,9 +448,19 @@ export class VideoEngine {
 
       const { maxCondFrames, numRecent, tokensPerMemoryMap, memDim, maxObjectPointers, embedDim, kvLen } = this.#video;
       const M = maxCondFrames + numRecent;
-      const zeroSpatial = this.#backend.allocTensor([M, tokensPerMemoryMap, memDim], 'float32', 'cpu');
+      // Batch-first `[1,M,T,C]` to match the graph input (no copyRegion here,
+      // so the leading batch dim can be baked into the zero allocation).
+      const zeroSpatial = this.#backend.allocTensor(
+        [1, M, tokensPerMemoryMap, memDim],
+        'float32',
+        'cpu',
+      );
       scratch.push(zeroSpatial);
-      const zeroSpatialPos = this.#backend.allocTensor([M, tokensPerMemoryMap, memDim], 'float32', 'cpu');
+      const zeroSpatialPos = this.#backend.allocTensor(
+        [1, M, tokensPerMemoryMap, memDim],
+        'float32',
+        'cpu',
+      );
       scratch.push(zeroSpatialPos);
       const spatialSpec = requireTensorSpec(inputs, 'memorySpatial', 'memoryAttention.inputs');
       feeds[spatialSpec.name] = zeroSpatial;
@@ -569,9 +589,24 @@ export class VideoEngine {
     feeds[visSpec.name] = visionFeatures;
     const maskSpec = requireTensorSpec(inputs, 'maskLogits', 'memoryEncoder.inputs');
     feeds[maskSpec.name] = decoded.maskLogits;
+    // Prompted (conditioning) frames binarize the mask for memory; tracked
+    // frames sigmoid it — the graph selects on this flag (FINDINGS.md §memory
+    // encoder). Uploaded float32 like the other host feeds (§4.3).
+    const promptedSpec = requireTensorSpec(inputs, 'isPrompted', 'memoryEncoder.inputs');
+    const promptedTensor = this.#backend.uploadTensor(
+      Float32Array.of(isCond ? 1 : 0),
+      [1],
+      'float32',
+    );
+    feeds[promptedSpec.name] = promptedTensor;
 
     const shouldCommit = !decoded.occluded || this.#strategy.commitOccludedMemory || isCond;
-    const out = await this.#graphs.memoryEncoder.run(feeds);
+    let out: Record<string, DeviceTensor>;
+    try {
+      out = await this.#graphs.memoryEncoder.run(feeds);
+    } finally {
+      promptedTensor.dispose();
+    }
     const featSpec = requireTensorSpec(this.#memoryEncoderEntry.outputs, 'memoryFeatures', 'memoryEncoder.outputs');
     const posSpec = requireTensorSpec(this.#memoryEncoderEntry.outputs, 'memoryPos', 'memoryEncoder.outputs');
     const memoryFeatures = out[featSpec.name];

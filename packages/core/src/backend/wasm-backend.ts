@@ -3,6 +3,7 @@ import { createOrtSession, OrtBackendSession } from '../runtime/ort-session.js';
 import {
   allocCpuTensor,
   createCpuTensor,
+  reshapeOrtView,
   OrtDeviceTensor,
   readbackTensor,
 } from '../runtime/ort-tensor.js';
@@ -210,6 +211,11 @@ export class WasmBackend implements Backend {
     validateCopyRegion(src, dst, slotIndex);
     const slotElems = slotElementCount(dst.shape);
     typedDataOf(dst).set(typedDataOf(src) as unknown, slotIndex * slotElems);
+  }
+
+  reshape(tensor: DeviceTensor, shape: readonly number[]): DeviceTensor {
+    this.#assertInitialized('reshape');
+    return reshapeOrtView(this.#ort, tensor, shape);
   }
 
   /**

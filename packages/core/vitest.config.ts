@@ -33,7 +33,34 @@ export default defineConfig({
         },
         test: {
           name: 'browser',
+          // Lightweight browser tests that need no large weights — these run in
+          // CI. The real-weights golden gates live under src/e2e and run via
+          // the separate 'e2e' project (weights are gitignored; not in CI).
           include: ['src/**/*.browser.test.ts'],
+          exclude: ['src/e2e/**'],
+          browser: {
+            enabled: true,
+            provider: 'playwright',
+            headless: true,
+            instances: [{ browser: 'chromium' }],
+          },
+        },
+      },
+      {
+        optimizeDeps: {
+          exclude: ['onnxruntime-web'],
+        },
+        server: {
+          fs: {
+            allow: [repoRoot],
+          },
+        },
+        test: {
+          // Real-weights golden gates (image + video). Require the gitignored
+          // tools/goldens/models-cache; run locally/nightly, NOT in CI. They
+          // fail loudly (never silently skip) when the weights are absent.
+          name: 'e2e',
+          include: ['src/e2e/**/*.browser.test.ts'],
           browser: {
             enabled: true,
             provider: 'playwright',

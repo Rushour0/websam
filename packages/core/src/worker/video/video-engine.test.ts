@@ -107,6 +107,12 @@ class FakeBackend implements Backend {
     this.copyRegionCalls.push(slotIndex);
   }
 
+  reshape(tensor: DeviceTensor, shape: readonly number[]): DeviceTensor {
+    // Non-owning view: not tracked in `live`, dispose is a no-op — never
+    // perturbs the census-flatness assertions.
+    return new FakeTensor([...shape], tensor.dtype, tensor.location, () => {});
+  }
+
   async readback(tensor: DeviceTensor): Promise<ArrayBufferView> {
     return new Float32Array(elemCount(tensor.shape)).fill(0);
   }
@@ -210,7 +216,7 @@ function manifest(video: VideoManifestSection): ModelManifest {
       { maskLogits: 'maskLogits', iouScores: 'iouScores', objectPointer: 'objectPointer', objectScoreLogits: 'objectScoreLogits' },
     ),
     memoryEncoder: graphEntry(
-      { visionFeatures: 'visionFeatures', maskLogits: 'maskLogits' },
+      { visionFeatures: 'visionFeatures', maskLogits: 'maskLogits', isPrompted: 'is_prompted' },
       { memoryFeatures: 'memoryFeatures', memoryPos: 'memoryPos' },
     ),
     noMemCondition: graphEntry({ visionFeatures: 'visionFeatures' }, { conditionedFeatures: 'conditionedFeatures' }),

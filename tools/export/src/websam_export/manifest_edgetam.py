@@ -152,17 +152,26 @@ def build_manifest(
     *,
     toolchain: dict[str, str],
 ) -> dict[str, Any]:
-    """Build the schemaVersion-1 EdgeTAM manifest. `onnx_dir` holds the fp16
-    `.onnx` files produced by `export_edgetam.export_all`."""
+    """Build the schemaVersion-1 EdgeTAM manifest. `onnx_dir` holds the fp32
+    AND fp16 `.onnx` files produced by `export_edgetam.export_all`
+    (`<basename>.onnx` = fp32 source, `<basename>_fp16.onnx` = converted).
+
+    Both quant keys are listed so `onnxruntime-web`'s wasm device (which
+    resolves `quantPreference [int8, fp32]` — fp16 is a CPU-execution-
+    provider trap there) has a graph to load; fp32 is the pre-conversion
+    source and numerically exact.
+    """
     graphs: dict[str, Any] = {}
     for role, io in GRAPH_IO.items():
         basename = GRAPH_FILES[role]
-        path = onnx_dir / f"{basename}.onnx"
-        if not path.is_file():
-            raise FileNotFoundError(f"manifest role {role!r}: missing artifact {path}")
-        ref = _file_ref(path)
+        fp32_path = onnx_dir / f"{basename}.onnx"
+        fp16_path = onnx_dir / f"{basename}_fp16.onnx"
+        if not fp32_path.is_file():
+            raise FileNotFoundError(f"manifest role {role!r}: missing artifact {fp32_path}")
+        if not fp16_path.is_file():
+            raise FileNotFoundError(f"manifest role {role!r}: missing artifact {fp16_path}")
         graphs[role] = {
-            "files": {"fp16": ref},
+            "files": {"fp32": _file_ref(fp32_path), "fp16": _file_ref(fp16_path)},
             "inputs": io["inputs"],
             "outputs": io["outputs"],
         }

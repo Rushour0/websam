@@ -86,6 +86,12 @@ class FakeBackend implements Backend {
     this.copyRegionCalls.push({ slotIndex, srcElems, dstShape: [...dst.shape] });
   }
 
+  reshape(tensor: DeviceTensor, shape: readonly number[]): DeviceTensor {
+    // Non-owning view: shares data, not tracked in `live`, dispose is a no-op —
+    // so it never perturbs the debugStats census.
+    return new FakeTensor([...shape], tensor.dtype, tensor.location, (tensor as FakeTensor).data, () => {});
+  }
+
   async readback(tensor: DeviceTensor): Promise<ArrayBufferView> {
     return (tensor as FakeTensor).data;
   }

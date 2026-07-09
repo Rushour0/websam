@@ -10,6 +10,7 @@ import {
   createCpuTensor,
   OrtDeviceTensor,
   readbackTensor,
+  reshapeOrtView,
 } from '../runtime/ort-tensor.js';
 import type {
   Backend,
@@ -323,6 +324,11 @@ export class WebGpuBackend implements Backend {
       slotBytes,
     );
     device.queue.submit([encoder.finish()]);
+  }
+
+  reshape(tensor: DeviceTensor, shape: readonly number[]): DeviceTensor {
+    this.#assertInitialized('reshape');
+    return reshapeOrtView(this.#ort, tensor, shape);
   }
 
   /** Read ort's WebGPU device (created lazily by ort during session creation). */
