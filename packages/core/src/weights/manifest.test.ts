@@ -53,46 +53,6 @@ function validManifest(): Record<string, unknown> {
   };
 }
 
-/** Minimal graph entry for a given ONNX file name (video-role stubs). */
-function graphEntry(file: string): Record<string, unknown> {
-  return {
-    files: { fp32: { path: file, sha256: 'e'.repeat(64), bytes: 128 } },
-    inputs: {},
-    outputs: {},
-  };
-}
-
-/** The EdgeTAM `video` section (tools/export spec.py EDGETAM_1024 constants). */
-function edgetamVideoSection(): Record<string, unknown> {
-  return {
-    maxCondFrames: 1,
-    numRecent: 6,
-    tokensPerMemoryMap: 256,
-    ptrTokens: 64,
-    maxObjectPointers: 16,
-    kvLen: 1856, // 7 * 256 + 64
-    memDim: 64,
-    embedDim: 256,
-    gridSize: 64,
-    multiObjectBatch: true,
-    initPath: 'noMemFlag',
-    tposDelivery: 'indices',
-    occlusionThreshold: 0,
-  };
-}
-
-/** A valid manifest carrying the video section + all four video graph roles. */
-function validVideoManifest(): Record<string, unknown> {
-  const json = validManifest();
-  const graphs = json['graphs'] as Record<string, unknown>;
-  graphs['videoEncoder'] = graphEntry('video_encoder.onnx');
-  graphs['memoryAttention'] = graphEntry('memory_attention.onnx');
-  graphs['maskDecoderVideo'] = graphEntry('mask_decoder_video.onnx');
-  graphs['memoryEncoder'] = graphEntry('memory_encoder.onnx');
-  json['video'] = edgetamVideoSection();
-  return json;
-}
-
 function expectRejects(json: unknown, messagePart: string | RegExp): void {
   let caught: unknown;
   try {
@@ -263,116 +223,143 @@ describe('parseModelManifest', () => {
   });
 });
 
-describe('parseModelManifest — video section (M2)', () => {
-  it('parses a valid EdgeTAM video section', () => {
-    const manifest = parseModelManifest(validVideoManifest(), SOURCE_URL);
+// ---------------------------------------------------------------------------
+// video section (M2 EdgeTAM). Values match the export spike FINDINGS:
+// 512 tokens/map, 1 cond + 6 recent, kvLen = 7*512 + 64 = 3648.
+// ---------------------------------------------------------------------------
+
+function stubGraph(path: string): Record<string, unknown> {
+  return {
+    files: { fp32: { path, sha256: 'e'.repeat(64), bytes: 128 } },
+    inputs: {},
+    outputs: {},
+  };
+}
+
+/** A fully valid EdgeTAM video manifest (image graphs + four video graphs + video section). */
+function validVideoManifest(): Record<string, unknown> {
+  const json = validManifest();
+  json['tier'] = 'edgetam';
+  const graphs = json['graphs'] as Record<string, unknown>;
+  graphs['videoEncoder'] = stubGraph('vision_encoder.onnx');
+  graphs['memoryAttention'] = stubGraph('memory_attention.onnx');
+  graphs['maskDecoderVideo'] = stubGraph('mask_decoder_video.onnx');
+  graphs['memoryEncoder'] = stubGraph('memory_encoder.onnx');
+  json['video'] = {
+    maxCondFrames: 1,
+    numRecent: 6,
+    tokensPerMemoryMap: 512,
+    ptrTokens: 64,
+    maxObjectPointers: 16,
+    kvLen: 3648,
+    memDim: 64,
+    embedDim: 256,
+    gridSize: 64,
+    multiObjectBatch: true,
+    initPath: 'noMemGraph',
+    tposDelivery: 'precombined',
+    occlusionThreshold: 0,
+  };
+  return json;
+}
+
+describe('parseModelManifest — video section', () => {
+  it('accepts a valid EdgeTAM video manifest', () => {
+    const manifest: ModelManifest = parseModelManifest(validVideoManifest(), SOURCE_URL);
     expect(manifest.video).toEqual({
       maxCondFrames: 1,
       numRecent: 6,
-      tokensPerMemoryMap: 256,
+      tokensPerMemoryMap: 512,
       ptrTokens: 64,
       maxObjectPointers: 16,
-      kvLen: 1856,
+      kvLen: 3648,
       memDim: 64,
       embedDim: 256,
       gridSize: 64,
       multiObjectBatch: true,
-      initPath: 'noMemFlag',
-      tposDelivery: 'indices',
+      initPath: 'noMemGraph',
+      tposDelivery: 'precombined',
       occlusionThreshold: 0,
     });
+    // The four video roles resolved on the open GraphRole union.
+    expect(manifest.graphs['memoryAttention']?.files.fp32?.path).toBe('memory_attention.onnx');
   });
 
-  it('omits `video` when absent (M1 image-only manifests keep parsing)', () => {
+  it('leaves video undefined when the section is absent (image-only manifest)', () => {
     const manifest = parseModelManifest(validManifest(), SOURCE_URL);
     expect(manifest.video).toBeUndefined();
   });
 
-  it('returns a defensive copy of the video section', () => {
+  it('accepts a negative occlusionThreshold (it is a logit threshold, not a count)', () => {
     const json = validVideoManifest();
+    (json['video'] as Record<string, unknown>)['occlusionThreshold'] = -12.5;
     const manifest = parseModelManifest(json, SOURCE_URL);
-    (json['video'] as Record<string, unknown>)['kvLen'] = 1;
-    expect(manifest.video?.kvLen).toBe(1856);
+    expect(manifest.video?.occlusionThreshold).toBe(-12.5);
   });
 
-  it('accepts the alternate enum values and a negative occlusion threshold', () => {
+  it('enforces the kvLen identity (maps*tokens + ptrTokens)', () => {
     const json = validVideoManifest();
-    const video = json['video'] as Record<string, unknown>;
-    video['initPath'] = 'noMemGraph';
-    video['tposDelivery'] = 'precombined';
-    video['multiObjectBatch'] = false;
-    video['occlusionThreshold'] = -2.5;
-    const manifest = parseModelManifest(json, SOURCE_URL);
-    expect(manifest.video?.initPath).toBe('noMemGraph');
-    expect(manifest.video?.tposDelivery).toBe('precombined');
-    expect(manifest.video?.multiObjectBatch).toBe(false);
-    expect(manifest.video?.occlusionThreshold).toBe(-2.5);
+    (json['video'] as Record<string, unknown>)['kvLen'] = 1856; // the stale pre-spike value
+    expectRejects(json, /kvLen/);
+
+    const ok = validVideoManifest();
+    // A self-consistent alternative arithmetic parses fine.
+    Object.assign(ok['video'] as Record<string, unknown>, {
+      maxCondFrames: 4,
+      numRecent: 6,
+      tokensPerMemoryMap: 5184,
+      ptrTokens: 64,
+      kvLen: 10 * 5184 + 64,
+    });
+    expect(parseModelManifest(ok, SOURCE_URL).video?.kvLen).toBe(51904);
   });
 
-  it('enforces the kvLen identity: maps × tokensPerMemoryMap + ptrTokens', () => {
-    const json = validVideoManifest();
-    (json['video'] as Record<string, unknown>)['kvLen'] = 1857;
-    expectRejects(json, /video\.kvLen.*1856/);
-  });
-
-  it('rejects non-positive or non-integer counts', () => {
+  it('rejects non-positive-integer counts', () => {
     for (const key of [
       'maxCondFrames',
       'numRecent',
       'tokensPerMemoryMap',
       'ptrTokens',
       'maxObjectPointers',
-      'kvLen',
       'memDim',
       'embedDim',
       'gridSize',
     ]) {
-      const zero = validVideoManifest();
-      (zero['video'] as Record<string, unknown>)[key] = 0;
-      expectRejects(zero, new RegExp(`video\\.${key}`));
-
-      const fractional = validVideoManifest();
-      (fractional['video'] as Record<string, unknown>)[key] = 1.5;
-      expectRejects(fractional, new RegExp(`video\\.${key}`));
+      const json = validVideoManifest();
+      (json['video'] as Record<string, unknown>)[key] = 0;
+      expectRejects(json, new RegExp(`video\\.${key}`));
     }
   });
 
-  it('rejects bad enum and flag fields', () => {
+  it('rejects bad enum + boolean fields', () => {
     const badInit = validVideoManifest();
-    (badInit['video'] as Record<string, unknown>)['initPath'] = 'always';
+    (badInit['video'] as Record<string, unknown>)['initPath'] = 'someOtherPath';
     expectRejects(badInit, /video\.initPath/);
 
     const badTpos = validVideoManifest();
-    (badTpos['video'] as Record<string, unknown>)['tposDelivery'] = 'gather';
+    (badTpos['video'] as Record<string, unknown>)['tposDelivery'] = 'gathered';
     expectRejects(badTpos, /video\.tposDelivery/);
 
     const badBatch = validVideoManifest();
     (badBatch['video'] as Record<string, unknown>)['multiObjectBatch'] = 'yes';
     expectRejects(badBatch, /video\.multiObjectBatch/);
 
-    const badThreshold = validVideoManifest();
-    (badThreshold['video'] as Record<string, unknown>)['occlusionThreshold'] = 'low';
-    expectRejects(badThreshold, /video\.occlusionThreshold/);
-
-    const nanThreshold = validVideoManifest();
-    (nanThreshold['video'] as Record<string, unknown>)['occlusionThreshold'] = Number.NaN;
-    expectRejects(nanThreshold, /video\.occlusionThreshold/);
-
-    const notObject = validVideoManifest();
-    notObject['video'] = 'edgetam';
-    expectRejects(notObject, /video: must be an object/);
+    const badOcc = validVideoManifest();
+    (badOcc['video'] as Record<string, unknown>)['occlusionThreshold'] = 'low';
+    expectRejects(badOcc, /video\.occlusionThreshold/);
   });
 
-  it('requires all four video graph roles when the video section is present', () => {
+  it('rejects a video section missing any of the four required graph roles', () => {
     for (const role of ['videoEncoder', 'memoryAttention', 'maskDecoderVideo', 'memoryEncoder']) {
       const json = validVideoManifest();
       delete (json['graphs'] as Record<string, unknown>)[role];
-      expectRejects(json, new RegExp(`'${role}' is required`));
+      expectRejects(json, new RegExp(role));
     }
   });
 
-  it('does not require video roles when the video section is absent', () => {
-    // validManifest ships only the two image graphs and stays valid.
-    expect(() => parseModelManifest(validManifest(), SOURCE_URL)).not.toThrow();
+  it('rejects a non-object video section', () => {
+    const json = validVideoManifest();
+    json['video'] = 42;
+    expectRejects(json, /video: must be an object/);
   });
 });

@@ -67,3 +67,6 @@ jobs:
       # plain headless Chromium exposes no WebGPU adapter.
       - name: Browser tests (@websam/core)
         run: xvfb-run -a pnpm --filter @websam/core test:browser
+
+      - name: Browser tests (@websam/video-editing)
+        run: xvfb-run -a pnpm --filter @websam/video-editing test:browser

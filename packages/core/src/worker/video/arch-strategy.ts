@@ -1,145 +1,159 @@
 /**
- * Per-arch video-memory semantics, isolated in ONE strategy object so SAM3
- * lands at M3 by adding a branch here — the memory bank and video engine
- * never contain arch conditionals.
+ * Per-architecture video (memory-bank) semantics, isolated in ONE strategy
+ * object so a second tracker family (SAM3) lands at M3 by adding a branch —
+ * never by editing the memory bank or engine.
  *
- * Mirrors the executable export spec (`tools/export/src/websam_export/spec.py`):
- * the tpos rule, cond-frame selection, and pointer-delta packing below are
- * the same rules the Python golden generator runs, so JS and the export
- * pipeline share one contract (docs/m2-internal-contracts.md §3.1).
- *
- * Every semantic constant (numRecent, maxObjectPointers, …) comes from the
- * manifest's {@link VideoManifestSection} — never a TS constant.
+ * Every rule here mirrors the executable export spec
+ * (`tools/export/src/websam_export/spec.py`) and the EdgeTAM export spike
+ * (`tools/export/spikes/m2-edgetam/{FINDINGS.md,e2e_loop.py}`), which is the
+ * authoritative source for the EdgeTAM numbers. Where FINDINGS.md corrected an
+ * earlier assumption the divergence is called out inline.
  */
 
-import { InvalidStateError, NotImplementedError } from '../../errors.js';
 import type { ModelSpec } from '../../registry.js';
+import { InvalidStateError, NotImplementedError } from '../../errors.js';
 import type { VideoManifestSection } from '../../weights/manifest.js';
 
-/** A memory-bank entry reference: which frame produced it, and whether it was prompted. */
+/** A memory-bank entry's frame identity and conditioning status. */
 export interface MemoryEntryRef {
   frameIdx: number;
   isCond: boolean;
 }
 
-/** Arch-specific memory semantics consumed by the memory bank and video engine. */
+/** Architecture-specific bookkeeping the memory bank and engine defer to. */
 export interface VideoArchStrategy {
+  /** The architecture this strategy serves. */
   readonly arch: ModelSpec['arch'];
+
   /**
-   * Temporal-position embedding index for one memory entry (spec.py tpos_index):
-   * cond → numRecent; recent at offset k (1 = most recent valid entry) → k-1.
-   * `recentOffset` is the 1-based RECENCY RANK among valid recent slots
-   * (descending frameIdx), not the raw frame distance.            ⚠ PIN-5
+   * Temporal-position embedding index for one memory entry (mirrors
+   * `spec.py::tpos_index`): a **conditioning** map uses the dedicated last
+   * slot `numRecent`; a **recent** map at `recentOffset = k` uses `k - 1`.
+   *
+   * `recentOffset` is the RAW FRAME DISTANCE `currentFrame − entry.frameIdx`
+   * (FINDINGS.md gotcha 3 + e2e_loop.py: HF gathers recent maps by temporal
+   * offset `k = t − prev`, not by dense recency rank — the two coincide for
+   * gapless streaming but diverge when a conditioning frame falls inside the
+   * recent window, where the cond frame is skipped yet still consumes an
+   * offset). Must satisfy `1 <= recentOffset <= numRecent`.
+   *
+   * @throws InvalidStateError — `recentOffset` missing (non-cond) or out of range.
    */
   tposIndex(entry: { isCond: boolean; recentOffset?: number }): number;
+
   /**
-   * Which cond frames stay when the region overflows / at assembly, replicating
-   * HF `_select_closest_cond_frames` tie-breaking exactly (EdgeTAM max=1 → the
-   * single closest to `currentFrame`; ties break toward the LOWER frameIdx). ⚠ PIN-6
+   * Which conditioning frames survive when the cond region would overflow,
+   * replicating HF `_select_closest_cond_frames`: keep the closest-before and
+   * closest-after anchors, then fill by `|Δt|` to `currentFrame`, ties broken
+   * toward the LOWER frameIdx. Winners are returned in the input's insertion
+   * order. `max <= 0` or `condFrames.length <= max` returns every frame
+   * unchanged (EdgeTAM's `max_cond_frame_num = -1` maps to a large `max`; the
+   * single-prompt M2 path never overflows).
    */
   selectCondFrames(condFrames: readonly number[], currentFrame: number, max: number): number[];
+
   /**
-   * Streaming pointer deltas (`currentFrame - ptrFrame`), most-recent-first,
-   * zero-padded to maxObjectPointers; int64 because it is a graph input.  ⚠ PIN-9
+   * Streaming pointer temporal deltas (`currentFrame − ptrFrame`),
+   * most-recent-first, zero-padded to `maxObjectPointers`; int64 because it is
+   * a graph input on architectures that consume it.
+   *
+   * EdgeTAM DISABLES pointer temporal position encoding
+   * (`enable_temporal_pos_encoding_for_object_pointers = False`, FINDINGS.md
+   * divergence 4) — its exported graph has no pointer-time input at all, so
+   * this returns an all-zero (inert) array of length `maxObjectPointers`.
    */
   pointerTimeDeltas(ptrFrames: readonly number[], currentFrame: number): BigInt64Array;
-  /** Whether an occluded frame's memory is still committed to the bank. ⚠ PIN-8 */
+
+  /** Whether an occluded frame's encoded memory is still committed to the bank. */
   readonly commitOccludedMemory: boolean;
 }
 
 /**
- * Replicates HF `_select_closest_cond_frames`: keep everything when it fits;
- * otherwise keep the closest cond frame strictly before `currentFrame`, the
- * closest at/after it, then fill remaining capacity by ascending absolute
- * distance. Candidates are sorted ascending first, so the stable sort breaks
- * distance ties toward the LOWER frameIdx — which is also what makes the
- * `max === 1` extension (EdgeTAM) "single closest, ties toward lower". ⚠ PIN-6
+ * EdgeTAM strategy, pinned to the M2 export spike. Notable divergences from the
+ * SAM3-tracker semantics in `spec.py` (all confirmed by `e2e_loop.py`,
+ * IoU 1.0 vs HF):
+ *
+ * - 512 tokens per memory map (256 1D + 256 2D perceiver latents), 1 cond + 6
+ *   recent maps, `kvLen = 3648` — all delivered via the manifest.
+ * - Recent-map tpos indexed by raw frame distance (see {@link tposIndex}).
+ * - Object pointers carry NO temporal position (deltas are inert).
+ * - Memory is committed on every tracked frame regardless of occlusion — the
+ *   e2e loop never gates the memory encoder on `object_score_logits`
+ *   (FINDINGS.md divergence 5), so {@link commitOccludedMemory} is `true`.
  */
-function selectClosestCondFrames(
-  condFrames: readonly number[],
-  currentFrame: number,
-  max: number,
-): number[] {
-  if (!Number.isInteger(max) || max < 1) {
-    throw new InvalidStateError(`selectCondFrames: max must be a positive integer, got ${max}`);
-  }
-  const ascending = [...condFrames].sort((a, b) => a - b);
-  if (ascending.length <= max) return ascending;
+class EdgetamStrategy implements VideoArchStrategy {
+  readonly arch = 'edgetam' as const;
+  readonly commitOccludedMemory = true;
 
-  if (max === 1) {
-    // HF asserts max >= 2; EdgeTAM's maxCondFrames = 1 extends the rule to
-    // "the single closest to currentFrame", ties toward the lower frameIdx.
-    let winner = ascending[0]!;
-    for (const f of ascending) {
-      if (Math.abs(f - currentFrame) < Math.abs(winner - currentFrame)) winner = f;
+  readonly #numRecent: number;
+  readonly #maxObjectPointers: number;
+
+  constructor(video: VideoManifestSection) {
+    this.#numRecent = video.numRecent;
+    this.#maxObjectPointers = video.maxObjectPointers;
+  }
+
+  tposIndex(entry: { isCond: boolean; recentOffset?: number }): number {
+    if (entry.isCond) return this.#numRecent;
+    const k = entry.recentOffset;
+    if (k === undefined) {
+      throw new InvalidStateError('tposIndex: recentOffset is required for non-conditioning memories');
     }
-    return [winner];
+    if (!Number.isInteger(k) || k < 1 || k > this.#numRecent) {
+      throw new InvalidStateError(`tposIndex: recentOffset must be in [1, ${this.#numRecent}], got ${k}`);
+    }
+    return k - 1;
   }
 
-  const selected = new Set<number>();
-  // Closest cond frame strictly before currentFrame.
-  const before = ascending.filter((f) => f < currentFrame);
-  if (before.length > 0) selected.add(before[before.length - 1]!);
-  // Closest cond frame at/after currentFrame.
-  const after = ascending.find((f) => f >= currentFrame);
-  if (after !== undefined) selected.add(after);
-  // Fill the remaining capacity by temporal closeness (stable → lower wins ties).
-  const remaining = ascending
-    .filter((f) => !selected.has(f))
-    .sort((a, b) => Math.abs(a - currentFrame) - Math.abs(b - currentFrame));
-  for (const f of remaining) {
-    if (selected.size >= max) break;
-    selected.add(f);
+  selectCondFrames(condFrames: readonly number[], currentFrame: number, max: number): number[] {
+    if (max <= 0 || condFrames.length <= max) return [...condFrames];
+
+    const selected = new Set<number>();
+    // HF forces one anchor on each side of the current frame when max >= 2.
+    if (max >= 2) {
+      let before = -Infinity;
+      let after = Infinity;
+      for (const t of condFrames) {
+        if (t < currentFrame && t > before) before = t;
+        if (t >= currentFrame && t < after) after = t;
+      }
+      if (before !== -Infinity) selected.add(before);
+      if (after !== Infinity) selected.add(after);
+    }
+    // Fill the rest by |Δt|, ties toward the lower frameIdx.
+    const remaining = condFrames
+      .filter((t) => !selected.has(t))
+      .sort((a, b) => Math.abs(a - currentFrame) - Math.abs(b - currentFrame) || a - b);
+    for (const t of remaining) {
+      if (selected.size >= max) break;
+      selected.add(t);
+    }
+    return condFrames.filter((t) => selected.has(t)).slice(0, max);
   }
-  return [...selected].sort((a, b) => a - b);
+
+  pointerTimeDeltas(_ptrFrames: readonly number[], _currentFrame: number): BigInt64Array {
+    // EdgeTAM: pointer temporal PE disabled → deltas are never read; return the
+    // fixed-length inert (zero) vector so callers can bind a stable shape.
+    return new BigInt64Array(this.#maxObjectPointers);
+  }
 }
 
 /**
- * Build the strategy for one architecture. EdgeTAM is the only M2 arch;
- * `'sam3-tracker'` gains its branch at M3.
+ * Build the {@link VideoArchStrategy} for a model architecture from its video
+ * manifest section.
  *
- * @param arch - Architecture family from the registry {@link ModelSpec}.
- * @param video - The manifest's video section (all semantic constants).
- * @throws NotImplementedError — arch without an M2 video strategy.
+ * @throws NotImplementedError — for architectures whose video strategy has not
+ * landed yet (SAM3 tracker arrives at M3).
  */
-export function strategyFor(
-  arch: ModelSpec['arch'],
-  video: VideoManifestSection,
-): VideoArchStrategy {
-  if (arch !== 'edgetam') {
-    throw new NotImplementedError(`strategyFor('${arch}') video strategy, lands in M3`);
+export function strategyFor(arch: ModelSpec['arch'], video: VideoManifestSection): VideoArchStrategy {
+  switch (arch) {
+    case 'edgetam':
+      return new EdgetamStrategy(video);
+    case 'sam3-tracker':
+      throw new NotImplementedError('strategyFor(sam3-tracker), lands in M3');
+    default: {
+      const exhaustive: never = arch;
+      throw new NotImplementedError(`strategyFor(${String(exhaustive)})`);
+    }
   }
-  const { numRecent, maxObjectPointers } = video;
-  return {
-    arch,
-    tposIndex(entry) {
-      // spec.py::tpos_index — cond → the dedicated last slot (numRecent);
-      // recent at recency rank k (1 = most recent) → k - 1.
-      if (entry.isCond) return numRecent;
-      const k = entry.recentOffset;
-      if (k === undefined) {
-        throw new InvalidStateError('tposIndex: recentOffset is required for non-cond memories');
-      }
-      if (!Number.isInteger(k) || k < 1 || k > numRecent) {
-        throw new InvalidStateError(`tposIndex: recentOffset must be in [1, ${numRecent}], got ${k}`);
-      }
-      return k - 1;
-    },
-    selectCondFrames(condFrames, currentFrame, max) {
-      return selectClosestCondFrames(condFrames, currentFrame, max);
-    },
-    pointerTimeDeltas(ptrFrames, currentFrame) {
-      // ⚠ PIN-9: EdgeTAM streaming rule assumed `currentFrame - ptrFrame`,
-      // most-recent-first; the spike may re-pin this as manifest/strategy data.
-      const deltas = new BigInt64Array(maxObjectPointers); // zero-padded tail
-      const recentFirst = [...ptrFrames].sort((a, b) => b - a).slice(0, maxObjectPointers);
-      for (const [i, frame] of recentFirst.entries()) {
-        deltas[i] = BigInt(currentFrame - frame);
-      }
-      return deltas;
-    },
-    // ⚠ PIN-8: HF SAM2/EdgeTAM commits the encoded (empty-mask) memory even
-    // for occluded frames; the spike may flip this to false.
-    commitOccludedMemory: true,
-  };
 }

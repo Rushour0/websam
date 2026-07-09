@@ -1,5 +1,4 @@
-import { InvalidStateError, NotImplementedError, decodeRLE } from '@websam/core';
-import type { RLEMask } from '@websam/core';
+import { decodeRLE, InvalidStateError, NotImplementedError, type RLEMask } from '@websam/core';
 import { Zip, ZipPassThrough } from 'fflate';
 import type { MaskTimeline } from './timeline.js';
 
@@ -45,10 +44,9 @@ export interface ExportOptions {
    */
   source?: AsyncIterable<VideoFrame | ImageBitmap>;
   /**
-   * Progress callback, called after each frame index is processed with the
-   * number of frame indices finished so far and the timeline's total
-   * `frameCount`. Frames with no stored mask (holes) still count as
-   * finished — they are skipped, not failed.
+   * Progress callback. Called once per timeline frame index with the number
+   * of frame indices processed so far and the total frame count — sparse
+   * (hole) frames advance the count too, so progress tracks reality.
    */
   onProgress?: (framesDone: number, frameCount: number) => void;
 }
@@ -64,34 +62,35 @@ export interface ExportResult {
   /** Suggested file name, e.g. `matte.zip` or `cutout.webm`. */
   suggestedFileName: string;
   /**
-   * How many mask images were actually exported (one per stored
-   * object×frame). Sparse timelines are normal — a cancelled propagation
-   * leaves holes, which are skipped — so this reports reality rather than
-   * `frameCount × objects`.
+   * Number of PNG frames actually written across all objects. Sparse
+   * timelines (e.g. from a cancelled propagation) export fewer frames than
+   * `timeline.frameCount`; holes are skipped, not failed.
    */
   framesExported: number;
 }
 
 /**
- * Sidecar metadata written as `timeline.json` at the zip root of a
- * `'png-sequence'` export: the timeline dimensions plus, per object, the
- * frame indices that were actually exported.
+ * Per-object frame index lists plus timeline geometry, written as
+ * `timeline.json` at the zip root so importers can reassemble the sequence.
  */
-interface TimelineSidecar {
+interface TimelineManifest {
   fps: number;
   frameCount: number;
   width: number;
   height: number;
-  /** Ascending frame indices exported for each object, keyed by object id. */
+  /** Object id → ascending list of frame indices that have a PNG. */
   objects: Record<string, number[]>;
 }
 
 /**
  * Exports a {@link MaskTimeline} as alpha mattes or cutouts.
  *
- * M2 surface: `'matte'` + `'png-sequence'` is real (`'auto'` resolves to
- * `'png-sequence'`); `'cutout'` and `'webm-vp9-alpha'` still throw
- * {@link NotImplementedError} until M4.
+ * M2: `'matte'` + `'png-sequence'` (and `'auto'`, which resolves to
+ * `'png-sequence'`) are real — a store-mode zip of one white-on-black PNG per
+ * tracked frame plus a `timeline.json` index. `'cutout'` and
+ * `'webm-vp9-alpha'` still throw {@link NotImplementedError} (they land in
+ * M4). PNG rendering needs `OffscreenCanvas`/`ImageData`, so the matte path is
+ * browser/worker-only.
  */
 export class AlphaMatteExporter {
   /** The timeline whose masks will be exported. */
@@ -104,21 +103,10 @@ export class AlphaMatteExporter {
   /**
    * Render and encode the timeline's masks.
    *
-   * `'matte'` + `'png-sequence'` produces a **store-mode** zip (PNGs are
-   * already DEFLATE-compressed; fflate is used purely as a streaming
-   * container writer). Layout: with a single tracked object, PNGs sit at
-   * the zip root as `frame-%06d.png`; with multiple objects each gets a
-   * folder, `obj-<id>/frame-%06d.png`. A `timeline.json` sidecar records
-   * fps, frameCount, width, height, and the per-object frame index lists.
-   * Frames with no stored mask are **skipped, not failed** —
-   * {@link ExportResult.framesExported} and
-   * {@link ExportOptions.onProgress} report reality.
-   *
-   * @throws NotImplementedError — `'cutout'` mode and `'webm-vp9-alpha'`
-   * format, both landing in M4.
-   * @throws InvalidStateError — no `OffscreenCanvas` available (the PNG
-   * path is browser/worker-only) or a mask's dimensions do not match the
-   * timeline's.
+   * @throws NotImplementedError — for `'cutout'` mode or `'webm-vp9-alpha'`
+   * format (both land in M4).
+   * @throws InvalidStateError — when `OffscreenCanvas`/`ImageData` are
+   * unavailable (i.e. outside a browser or worker).
    */
   async export(options: ExportOptions): Promise<ExportResult> {
     if (options.mode === 'cutout') {
@@ -128,78 +116,78 @@ export class AlphaMatteExporter {
     if (format === 'webm-vp9-alpha') {
       throw new NotImplementedError('webm-vp9-alpha export, lands in M4');
     }
-    // 'matte' + ('png-sequence' | 'auto'): VP9-alpha detection lands in M4,
-    // so 'auto' resolves to 'png-sequence' at M2.
-    return this.#exportPngSequence(options);
+    // mode === 'matte', format is 'png-sequence' or 'auto'; 'auto' resolves to
+    // 'png-sequence' at M2 (VP9-alpha detection lands in M4).
+    return this.exportPngSequence(options);
   }
 
-  async #exportPngSequence(options: ExportOptions): Promise<ExportResult> {
-    if (typeof OffscreenCanvas === 'undefined') {
-      throw new InvalidStateError(
-        'png-sequence export requires OffscreenCanvas — run in a browser window or worker',
-      );
-    }
+  private async exportPngSequence(options: ExportOptions): Promise<ExportResult> {
     const { timeline } = this;
-    const canvas = new OffscreenCanvas(timeline.width, timeline.height);
-    const ctx = canvas.getContext('2d');
-    if (ctx === null) {
-      throw new InvalidStateError('png-sequence export: OffscreenCanvas 2d context unavailable');
-    }
-
-    // Streaming store-mode zip: chunks accumulate as they are produced, so
-    // at no point do all rendered PNGs AND the finished zip coexist twice.
-    const chunks: Uint8Array<ArrayBuffer>[] = [];
-    let zip!: Zip;
-    const zipDone = new Promise<void>((resolve, reject) => {
-      zip = new Zip((err, chunk, final) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-        // fflate emits Uint8Array<ArrayBufferLike>; every chunk it produces
-        // here is freshly allocated or one we handed it, never reused.
-        chunks.push(chunk as Uint8Array<ArrayBuffer>);
-        if (final) resolve();
-      });
-    });
-    const addEntry = (name: string, bytes: Uint8Array): void => {
-      // ZipPassThrough = store mode: no compression work on PNG bytes.
-      const entry = new ZipPassThrough(name);
-      zip.add(entry);
-      entry.push(bytes, true);
-    };
-
     const objectIds = timeline.objectIds();
-    const singleObject = objectIds.length === 1;
-    const exportedFrames = new Map<string, number[]>(objectIds.map((id) => [id, []]));
-    let framesExported = 0;
+    const multiObject = objectIds.length > 1;
 
-    for (let frameIndex = 0; frameIndex < timeline.frameCount; frameIndex++) {
-      for (const objectId of objectIds) {
-        const rle = timeline.get(objectId, frameIndex);
-        if (rle === undefined) continue; // hole: skipped, not failed
-        const prefix = singleObject ? '' : `obj-${objectId}/`;
-        const name = `${prefix}frame-${String(frameIndex).padStart(6, '0')}.png`;
-        addEntry(name, await renderMattePng(canvas, ctx, rle, timeline));
-        exportedFrames.get(objectId)?.push(frameIndex);
-        framesExported += 1;
+    // Streaming store-mode zip: fflate emits chunks as we push each entry, so
+    // we never hold every PNG plus the whole zip in memory at once.
+    // Concrete-ArrayBuffer copies: fflate reuses its output buffers between
+    // callbacks, and the copy also narrows to `Uint8Array<ArrayBuffer>` (a
+    // valid `BlobPart`).
+    const chunks: Uint8Array<ArrayBuffer>[] = [];
+    let resolveBlob!: (blob: Blob) => void;
+    let rejectBlob!: (err: unknown) => void;
+    const blobPromise = new Promise<Blob>((resolve, reject) => {
+      resolveBlob = resolve;
+      rejectBlob = reject;
+    });
+    const zip = new Zip((err, data, final) => {
+      if (err) {
+        rejectBlob(err);
+        return;
       }
-      options.onProgress?.(frameIndex + 1, timeline.frameCount);
-    }
+      chunks.push(new Uint8Array(data));
+      if (final) resolveBlob(new Blob(chunks, { type: 'application/zip' }));
+    });
 
-    const sidecar: TimelineSidecar = {
+    const manifest: TimelineManifest = {
       fps: timeline.fps,
       frameCount: timeline.frameCount,
       width: timeline.width,
       height: timeline.height,
-      objects: Object.fromEntries(exportedFrames),
+      objects: {},
     };
-    addEntry('timeline.json', new TextEncoder().encode(JSON.stringify(sidecar)));
-    zip.end();
-    await zipDone;
+    for (const id of objectIds) manifest.objects[id] = [];
 
+    let framesExported = 0;
+    try {
+      for (let frameIndex = 0; frameIndex < timeline.frameCount; frameIndex++) {
+        for (const id of objectIds) {
+          const rle = timeline.get(id, frameIndex);
+          if (rle === undefined) continue; // hole — skipped, not failed
+          const png = await renderMatte(rle);
+          const name = multiObject
+            ? `obj-${id}/frame-${pad6(frameIndex)}.png`
+            : `frame-${pad6(frameIndex)}.png`;
+          const entry = new ZipPassThrough(name);
+          zip.add(entry);
+          entry.push(png, true);
+          manifest.objects[id]?.push(frameIndex);
+          framesExported++;
+        }
+        options.onProgress?.(frameIndex + 1, timeline.frameCount);
+      }
+
+      const metaEntry = new ZipPassThrough('timeline.json');
+      zip.add(metaEntry);
+      metaEntry.push(new TextEncoder().encode(JSON.stringify(manifest)), true);
+      zip.end();
+    } catch (err) {
+      // Surface the failure through the thrown error; `blobPromise` stays
+      // pending (never rejected) so there is no unhandled rejection to leak.
+      throw err;
+    }
+
+    const blob = await blobPromise;
     return {
-      blob: new Blob(chunks, { type: 'application/zip' }),
+      blob,
       format: 'png-sequence',
       suggestedFileName: 'matte.zip',
       framesExported,
@@ -207,33 +195,41 @@ export class AlphaMatteExporter {
   }
 }
 
+/** Zero-pad a frame index to six digits (`frame-000042.png`). */
+function pad6(n: number): string {
+  return String(n).padStart(6, '0');
+}
+
 /**
- * Render one RLE mask as a white-on-black, fully opaque RGBA PNG via the
- * shared OffscreenCanvas.
+ * Render one mask into PNG bytes: a white-on-black opaque RGBA matte encoded
+ * via `OffscreenCanvas.convertToBlob({type:'image/png'})`.
+ *
+ * @throws InvalidStateError — when `OffscreenCanvas`/`ImageData` are absent.
  */
-async function renderMattePng(
-  canvas: OffscreenCanvas,
-  ctx: OffscreenCanvasRenderingContext2D,
-  rle: RLEMask,
-  dims: { width: number; height: number },
-): Promise<Uint8Array> {
-  if (rle.width !== dims.width || rle.height !== dims.height) {
+async function renderMatte(rle: RLEMask): Promise<Uint8Array> {
+  if (typeof OffscreenCanvas === 'undefined' || typeof ImageData === 'undefined') {
     throw new InvalidStateError(
-      `png-sequence export: mask is ${rle.width}x${rle.height}, timeline is ${dims.width}x${dims.height}`,
+      'AlphaMatteExporter: PNG export needs OffscreenCanvas/ImageData (browser or worker only)',
     );
   }
-  const mask = decodeRLE(rle);
-  const imageData = ctx.createImageData(dims.width, dims.height);
-  const pixels = imageData.data;
-  for (let i = 0; i < mask.length; i++) {
-    const value = mask[i] ? 255 : 0;
+  const { width, height } = rle;
+  const binary = decodeRLE(rle);
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  for (let i = 0; i < binary.length; i++) {
+    const value = binary[i] ? 255 : 0;
     const offset = i * 4;
-    pixels[offset] = value;
-    pixels[offset + 1] = value;
-    pixels[offset + 2] = value;
-    pixels[offset + 3] = 255; // opaque matte: value lives in RGB, not alpha
+    rgba[offset] = value;
+    rgba[offset + 1] = value;
+    rgba[offset + 2] = value;
+    rgba[offset + 3] = 255; // opaque
   }
-  ctx.putImageData(imageData, 0, 0);
+  const image = new ImageData(rgba, width, height);
+  const canvas = new OffscreenCanvas(width, height);
+  const ctx = canvas.getContext('2d');
+  if (ctx === null) {
+    throw new InvalidStateError('AlphaMatteExporter: OffscreenCanvas 2D context unavailable');
+  }
+  ctx.putImageData(image, 0, 0);
   const blob = await canvas.convertToBlob({ type: 'image/png' });
   return new Uint8Array(await blob.arrayBuffer());
 }

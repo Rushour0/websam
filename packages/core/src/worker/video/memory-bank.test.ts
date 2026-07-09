@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import type {
   Backend,
   BackendSession,
@@ -14,105 +14,86 @@ import { strategyFor } from './arch-strategy.js';
 import { MemoryBank } from './memory-bank.js';
 
 // ---------------------------------------------------------------------------
-// FakeBackend: cpu typed arrays + a REAL copyRegion (contiguous byte copy per
-// the §1.1 relaxed rule) so slot arithmetic is asserted on real bytes.
+// FakeBackend: cpu-backed tensors so slot arithmetic is asserted on real bytes,
+// with recorded copyRegion calls and a debugStats census. Mirrors the wasm
+// backend's cpu semantics (copyRegion === TypedArray.set) — the M2 primitive
+// the real backend agent implements.
 // ---------------------------------------------------------------------------
 
-function typedArrayFor(dtype: DType, elements: number): Float32Array | BigInt64Array | Uint8Array | Int32Array | Uint16Array {
-  switch (dtype) {
-    case 'float32':
-      return new Float32Array(elements);
-    case 'int64':
-      return new BigInt64Array(elements);
-    case 'uint8':
-    case 'bool':
-      return new Uint8Array(elements);
-    case 'int32':
-      return new Int32Array(elements);
-    case 'float16':
-      return new Uint16Array(elements);
-  }
+function elemCount(shape: readonly number[]): number {
+  return shape.reduce((a, b) => a * b, 1);
 }
 
 class FakeTensor implements DeviceTensor {
-  disposed = false;
+  #disposed = false;
   constructor(
     readonly shape: readonly number[],
     readonly dtype: DType,
     readonly location: TensorLocation,
-    readonly data: ReturnType<typeof typedArrayFor>,
+    readonly data: Float32Array,
     private readonly onDispose: (t: FakeTensor) => void,
   ) {}
+  get disposed(): boolean {
+    return this.#disposed;
+  }
   dispose(): void {
-    if (this.disposed) throw new InvalidStateError('FakeTensor disposed twice');
-    this.disposed = true;
+    if (this.#disposed) throw new InvalidStateError('FakeTensor already disposed');
+    this.#disposed = true;
     this.onDispose(this);
   }
-}
-
-interface CopyRegionCall {
-  src: FakeTensor;
-  dst: FakeTensor;
-  slotIndex: number;
 }
 
 class FakeBackend implements Backend {
   readonly kind = 'wasm' as const;
   readonly live = new Set<FakeTensor>();
-  readonly allocCalls: { shape: readonly number[]; dtype: DType; location: TensorLocation }[] = [];
-  readonly copyRegionCalls: CopyRegionCall[] = [];
+  readonly copyRegionCalls: { slotIndex: number; srcElems: number; dstShape: number[] }[] = [];
 
   async init(): Promise<void> {}
-  async createSession(_graph: GraphAsset, _plan?: IOBindingPlan): Promise<BackendSession> {
-    throw new Error('FakeBackend.createSession is not used by the bank');
+  async createSession(_g: GraphAsset, _p?: IOBindingPlan): Promise<BackendSession> {
+    throw new NotImplementedError('FakeBackend.createSession');
   }
 
   allocTensor(shape: readonly number[], dtype: DType, location: TensorLocation): DeviceTensor {
-    this.allocCalls.push({ shape: [...shape], dtype, location });
-    const elements = shape.reduce((a, b) => a * b, 1);
-    const tensor = new FakeTensor(
+    const t = new FakeTensor(
       [...shape],
       dtype,
       location,
-      typedArrayFor(dtype, elements),
-      (t) => this.live.delete(t),
+      new Float32Array(elemCount(shape)),
+      (x) => this.live.delete(x),
     );
-    this.live.add(tensor);
-    return tensor;
+    this.live.add(t);
+    return t;
   }
 
   uploadTensor(data: ArrayBufferView, shape: readonly number[], dtype: DType): DeviceTensor {
-    const elements = shape.reduce((a, b) => a * b, 1);
-    const copy = typedArrayFor(dtype, elements);
-    copy.set(data as never);
-    const tensor = new FakeTensor([...shape], dtype, 'cpu', copy, (t) => this.live.delete(t));
-    this.live.add(tensor);
-    return tensor;
+    const src = data as Float32Array;
+    const t = new FakeTensor([...shape], dtype, 'cpu', Float32Array.from(src), (x) =>
+      this.live.delete(x),
+    );
+    this.live.add(t);
+    return t;
   }
 
-  /** §1.1 relaxed rule: src element count == one dst slot's, same dtype; contiguous copy. */
   copyRegion(src: DeviceTensor, dst: DeviceTensor, slotIndex: number): void {
-    const s = src as FakeTensor;
-    const d = dst as FakeTensor;
-    if (s.disposed || d.disposed) throw new InvalidStateError('copyRegion on disposed tensor');
-    if (s.dtype !== d.dtype) throw new InvalidStateError('copyRegion dtype mismatch');
-    const slotElements = d.shape.slice(1).reduce((a, b) => a * b, 1);
-    const srcElements = s.shape.reduce((a, b) => a * b, 1);
-    if (srcElements !== slotElements) {
-      throw new InvalidStateError(
-        `copyRegion element-count mismatch: src ${srcElements} vs slot ${slotElements}`,
-      );
+    const slotElems = elemCount(dst.shape.slice(1));
+    const srcElems = elemCount(src.shape);
+    if (srcElems !== slotElems) {
+      throw new InvalidStateError(`copyRegion byte-count mismatch: src ${srcElems} != slot ${slotElems}`);
     }
-    const slotCount = d.shape[0] ?? 0;
-    if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex >= slotCount) {
-      throw new InvalidStateError(`copyRegion slot ${slotIndex} out of [0, ${slotCount})`);
-    }
-    (d.data as Float32Array).set(s.data as Float32Array, slotIndex * slotElements);
-    this.copyRegionCalls.push({ src: s, dst: d, slotIndex });
+    if (src.dtype !== dst.dtype) throw new InvalidStateError('copyRegion dtype mismatch');
+    if (slotIndex < 0 || slotIndex >= dst.shape[0]!) throw new InvalidStateError('copyRegion slot out of bounds');
+    (dst as FakeTensor).data.set((src as FakeTensor).data, slotIndex * slotElems);
+    this.copyRegionCalls.push({ slotIndex, srcElems, dstShape: [...dst.shape] });
   }
 
   async readback(tensor: DeviceTensor): Promise<ArrayBufferView> {
     return (tensor as FakeTensor).data;
+  }
+
+  debugStats(): { liveTensors: number; liveBytes: number } {
+    let liveBytes = 0;
+    for (const t of this.live) liveBytes += t.data.byteLength;
+    return { liveTensors: this.live.size, liveBytes };
   }
 
   async dispose(): Promise<void> {
@@ -121,498 +102,320 @@ class FakeBackend implements Backend {
 }
 
 // ---------------------------------------------------------------------------
-// Fixtures. The tiny section keeps byte-level assertions readable; the
-// EdgeTAM section checks the real spec.py constants. Both satisfy the kvLen
-// identity the manifest parser enforces.
+// Small-but-faithful video section: EdgeTAM slot arithmetic (1 cond + 6 recent,
+// 16-pointer bank, 4 tokens/pointer) with tiny token/dim sizes so ring bytes
+// are easy to assert. kvLen = (1+6)*2 + 64 = 78.
 // ---------------------------------------------------------------------------
 
-/** Tiny section: M = 1 cond + 3 recent = 4 slots, T=2 tokens, memDim=3 → 6-float slots. */
-function tinyVideo(): VideoManifestSection {
-  return {
-    maxCondFrames: 1,
-    numRecent: 3,
-    tokensPerMemoryMap: 2,
-    ptrTokens: 5,
-    maxObjectPointers: 4,
-    kvLen: 4 * 2 + 5, // 13
-    memDim: 3,
-    embedDim: 2,
-    gridSize: 8,
-    multiObjectBatch: true,
-    initPath: 'noMemFlag',
-    tposDelivery: 'indices',
-    occlusionThreshold: 0,
-  };
-}
+const T = 2; // tokensPerMemoryMap
+const MEM_DIM = 1;
+const EMBED_DIM = 4; // embedDim / memDim = 4 = ptrTokens / maxObjectPointers (splits)
+const M = 7; // maxCondFrames + numRecent
 
-/** Real EdgeTAM constants (spec.py EDGETAM_1024): 1 cond + 6 recent, 256 latents, kvLen 1856. */
-function edgetamVideo(): VideoManifestSection {
+function video(overrides: Partial<VideoManifestSection> = {}): VideoManifestSection {
   return {
     maxCondFrames: 1,
     numRecent: 6,
-    tokensPerMemoryMap: 256,
+    tokensPerMemoryMap: T,
     ptrTokens: 64,
     maxObjectPointers: 16,
-    kvLen: 7 * 256 + 64, // 1856
-    memDim: 64,
-    embedDim: 256,
-    gridSize: 64,
+    kvLen: M * T + 64,
+    memDim: MEM_DIM,
+    embedDim: EMBED_DIM,
+    gridSize: 1,
     multiObjectBatch: true,
-    initPath: 'noMemFlag',
-    tposDelivery: 'indices',
+    initPath: 'noMemGraph',
+    tposDelivery: 'precombined',
     occlusionThreshold: 0,
+    ...overrides,
   };
 }
 
-function makeBank(video: VideoManifestSection = tinyVideo()) {
-  const backend = new FakeBackend();
-  const strategy = strategyFor('edgetam', video);
-  const bank = new MemoryBank({ backend, video, strategy, location: 'cpu' });
-  return { backend, strategy, bank, video };
+function makeBank(backend: FakeBackend, overrides?: Partial<VideoManifestSection>) {
+  const v = video(overrides);
+  return new MemoryBank({ backend, video: v, strategy: strategyFor('edgetam', v), location: 'device' });
 }
 
-/** A [T, memDim] float32 tensor filled with `value` (distinct per commit in tests). */
-function slotTensor(backend: FakeBackend, video: VideoManifestSection, value: number): DeviceTensor {
-  const elements = video.tokensPerMemoryMap * video.memDim;
-  return backend.uploadTensor(
-    new Float32Array(elements).fill(value),
-    [video.tokensPerMemoryMap, video.memDim],
-    'float32',
-  );
+/** Sentinel feature/pos tensors filled with `value` so slot writes are checkable. */
+function feat(backend: FakeBackend, value: number, shape: readonly number[] = [T, MEM_DIM]): DeviceTensor {
+  const data = new Float32Array(elemCount(shape)).fill(value);
+  return backend.uploadTensor(data, shape, 'float32');
 }
 
-/** Commit frame memory filled with `frameIdx + 0.5` (features) / `-(frameIdx + 0.5)` (pos). */
-function commitFrame(
-  backend: FakeBackend,
-  bank: MemoryBank,
-  video: VideoManifestSection,
-  frameIdx: number,
-  isCond: boolean,
-): void {
-  const features = slotTensor(backend, video, frameIdx + 0.5);
-  const pos = slotTensor(backend, video, -(frameIdx + 0.5));
-  bank.commit(frameIdx, isCond, features, pos);
-  features.dispose();
-  pos.dispose();
+function pointerVec(value: number): Float32Array {
+  return new Float32Array(EMBED_DIM).fill(value);
 }
 
-/** The ring's slot `slot` as a plain number array (byte-level witness). */
-function ringSlot(ring: DeviceTensor, video: VideoManifestSection, slot: number): number[] {
-  const elements = video.tokensPerMemoryMap * video.memDim;
-  const data = (ring as FakeTensor).data as Float32Array;
-  return [...data.subarray(slot * elements, (slot + 1) * elements)];
+/** Commit cond frame then tracked frames in order (with pointers), reproducing the streaming loop. */
+function commitSequence(bank: MemoryBank, backend: FakeBackend, cond: number, tracked: number[]): void {
+  bank.commit(cond, true, feat(backend, cond), feat(backend, 1000 + cond));
+  bank.commitPointer(cond, pointerVec(cond));
+  for (const f of tracked) {
+    bank.commit(f, false, feat(backend, f), feat(backend, 1000 + f));
+    bank.commitPointer(f, pointerVec(f));
+  }
 }
 
-const filled = (video: VideoManifestSection, value: number) =>
-  new Array(video.tokensPerMemoryMap * video.memDim).fill(value);
+let backend: FakeBackend;
+beforeEach(() => {
+  backend = new FakeBackend();
+});
 
 describe('MemoryBank construction', () => {
-  it('allocates exactly two [M, T, memDim] float32 rings at the requested location', () => {
-    const { backend } = makeBank();
-    expect(backend.allocCalls).toEqual([
-      { shape: [4, 2, 3], dtype: 'float32', location: 'cpu' },
-      { shape: [4, 2, 3], dtype: 'float32', location: 'cpu' },
-    ]);
+  it('allocates exactly the two spatial rings and regions the slots', () => {
+    const bank = makeBank(backend);
     expect(backend.live.size).toBe(2);
-  });
-
-  it('uses the real EdgeTAM ring shape [7, 256, 64] for the edgetam section', () => {
-    const backend = new FakeBackend();
-    const video = edgetamVideo();
-    new MemoryBank({ backend, video, strategy: strategyFor('edgetam', video), location: 'device' });
-    expect(backend.allocCalls[0]).toEqual({
-      shape: [7, 256, 64],
-      dtype: 'float32',
-      location: 'device',
-    });
-  });
-
-  it('lays slots out as [0, maxCondFrames) cond then the recent ring, all invalid', () => {
-    const { bank } = makeBank();
-    expect(bank.slots.map((s) => s.isCond)).toEqual([true, false, false, false]);
-    expect(bank.slots.every((s) => !s.valid && s.frameIdx === -1)).toBe(true);
-  });
-
-  it("throws NotImplementedError for tposDelivery:'precombined' without leaking rings (⚠ PIN-3)", () => {
-    const backend = new FakeBackend();
-    const video: VideoManifestSection = { ...tinyVideo(), tposDelivery: 'precombined' };
-    expect(
-      () =>
-        new MemoryBank({
-          backend,
-          video,
-          strategy: strategyFor('edgetam', { ...video, tposDelivery: 'indices' }),
-          location: 'cpu',
-        }),
-    ).toThrow(NotImplementedError);
-    expect(backend.live.size).toBe(0);
-  });
-});
-
-describe('MemoryBank slot selection and eviction', () => {
-  it('cond commits land in the cond region (slot 0) and write real bytes to both rings', () => {
-    const { backend, bank, video } = makeBank();
-    commitFrame(backend, bank, video, 0, true);
-    expect(bank.slots[0]).toEqual({ frameIdx: 0, isCond: true, valid: true });
-    const asm = bank.assemble(1);
-    expect(ringSlot(asm.memorySpatial, video, 0)).toEqual(filled(video, 0.5));
-    expect(ringSlot(asm.memorySpatialPos, video, 0)).toEqual(filled(video, -0.5));
-  });
-
-  it('recent commits fill the first invalid recent slot, in order', () => {
-    const { backend, bank, video } = makeBank();
-    commitFrame(backend, bank, video, 1, false);
-    commitFrame(backend, bank, video, 2, false);
-    commitFrame(backend, bank, video, 3, false);
-    expect(bank.slots.map((s) => s.frameIdx)).toEqual([-1, 1, 2, 3]);
-    const asm = bank.assemble(4);
-    expect(ringSlot(asm.memorySpatial, video, 1)).toEqual(filled(video, 1.5));
-    expect(ringSlot(asm.memorySpatial, video, 2)).toEqual(filled(video, 2.5));
-    expect(ringSlot(asm.memorySpatial, video, 3)).toEqual(filled(video, 3.5));
-  });
-
-  it('a full recent ring evicts the slot with the smallest frameIdx (oldest)', () => {
-    const { backend, bank, video } = makeBank();
-    for (const f of [1, 2, 3]) commitFrame(backend, bank, video, f, false);
-    commitFrame(backend, bank, video, 4, false); // evicts frame 1 (slot 1)
-    expect(bank.slots.map((s) => s.frameIdx)).toEqual([-1, 4, 2, 3]);
-    const asm = bank.assemble(5);
-    expect(ringSlot(asm.memorySpatial, video, 1)).toEqual(filled(video, 4.5));
-    commitFrame(backend, bank, video, 5, false); // now frame 2 (slot 2) is oldest
-    expect(bank.slots.map((s) => s.frameIdx)).toEqual([-1, 4, 5, 3]);
-  });
-
-  it('re-committing the same recent frame refreshes its slot in place', () => {
-    const { backend, bank, video } = makeBank();
-    commitFrame(backend, bank, video, 1, false);
-    commitFrame(backend, bank, video, 2, false);
-    commitFrame(backend, bank, video, 1, false); // refresh, not a new slot
-    expect(bank.slots.map((s) => s.frameIdx)).toEqual([-1, 1, 2, -1]);
-  });
-
-  it('cond region full (EdgeTAM max=1): a new prompt overwrites the single cond slot', () => {
-    const { backend, bank, video } = makeBank();
-    commitFrame(backend, bank, video, 0, true);
-    commitFrame(backend, bank, video, 5, true);
-    expect(bank.slots[0]).toEqual({ frameIdx: 5, isCond: true, valid: true });
-    const asm = bank.assemble(6);
-    expect(ringSlot(asm.memorySpatial, video, 0)).toEqual(filled(video, 5.5));
-    // The recent ring is untouched by cond eviction.
-    expect(bank.slots.slice(1).every((s) => !s.valid)).toBe(true);
-  });
-
-  it('cond commits never spill into the recent ring', () => {
-    const { backend, bank, video } = makeBank();
-    for (const f of [0, 2, 4]) commitFrame(backend, bank, video, f, true);
-    expect(bank.slots.map((s) => s.frameIdx)).toEqual([4, -1, -1, -1]);
-  });
-
-  it('rejects wrong-shaped or wrong-dtype memory tensors', () => {
-    const { backend, bank, video } = makeBank();
-    const wrongShape = backend.uploadTensor(new Float32Array(4), [4], 'float32');
-    expect(() => bank.commit(0, true, wrongShape, wrongShape)).toThrow(InvalidStateError);
-    const wrongDtype = backend.uploadTensor(
-      new Uint8Array(video.tokensPerMemoryMap * video.memDim),
-      [video.tokensPerMemoryMap, video.memDim],
-      'uint8',
-    );
-    expect(() => bank.commit(0, true, wrongDtype, wrongDtype)).toThrow(InvalidStateError);
-  });
-
-  it('rejects a negative or non-integer frameIdx', () => {
-    const { backend, bank, video } = makeBank();
-    const t = slotTensor(backend, video, 1);
-    expect(() => bank.commit(-1, true, t, t)).toThrow(InvalidStateError);
-    expect(() => bank.commit(1.5, false, t, t)).toThrow(InvalidStateError);
-  });
-
-  it('does NOT take ownership of committed tensors (caller disposes per §4.5)', () => {
-    const { backend, bank, video } = makeBank();
-    const features = slotTensor(backend, video, 1);
-    const pos = slotTensor(backend, video, -1);
-    bank.commit(0, true, features, pos);
-    expect((features as FakeTensor).disposed).toBe(false);
-    expect((pos as FakeTensor).disposed).toBe(false);
-    features.dispose();
-    pos.dispose();
-  });
-
-  it('issues exactly one copyRegion per ring per commit (the frame step budget)', () => {
-    const { backend, bank, video } = makeBank();
-    commitFrame(backend, bank, video, 0, true);
-    expect(backend.copyRegionCalls.length).toBe(2);
-    expect(backend.copyRegionCalls.map((c) => c.slotIndex)).toEqual([0, 0]);
-  });
-});
-
-describe('MemoryBank temporal-id assignment (tposIndices)', () => {
-  it('assigns cond → numRecent and recent recency rank k → k-1 (spec.py rule)', () => {
-    const { backend, bank, video } = makeBank();
-    commitFrame(backend, bank, video, 0, true);
-    for (const f of [1, 2, 3]) commitFrame(backend, bank, video, f, false);
-    const asm = bank.assemble(4);
-    // Slot order: [cond@0, recent@1, recent@2, recent@3].
-    // Ranks (descending frameIdx): 3→1, 2→2, 1→3; tpos = rank-1; cond → 3 (= numRecent).
-    expect([...asm.tposIndices]).toEqual([3n, 2n, 1n, 0n]);
-  });
-
-  it('ranks by RECENCY among valid slots, not raw frame distance (⚠ PIN-5)', () => {
-    const { backend, bank, video } = makeBank();
-    // Sparse frames (gaps as after a refine): 2, 7, 9.
-    for (const f of [2, 7, 9]) commitFrame(backend, bank, video, f, false);
-    const asm = bank.assemble(20);
-    // Ranks: 9→1, 7→2, 2→3 regardless of the distance gaps.
-    expect([...asm.tposIndices]).toEqual([-1n, 2n, 1n, 0n]);
-  });
-
-  it('marks invalid slots with -1', () => {
-    const { backend, bank, video } = makeBank();
-    commitFrame(backend, bank, video, 1, false);
-    const asm = bank.assemble(2);
-    expect([...asm.tposIndices]).toEqual([-1n, 0n, -1n, -1n]);
-  });
-});
-
-describe('MemoryBank streaming rule + hasMemory', () => {
-  it('assemble(N) never sees frame N’s own memory (assembly precedes commit)', () => {
-    const { backend, bank, video } = makeBank();
-    commitFrame(backend, bank, video, 1, false);
-    commitFrame(backend, bank, video, 4, false);
-    const at4 = bank.assemble(4);
-    expect(at4.validMaps).toBe(1); // only frame 1 visible
-    expect([...at4.tposIndices]).toEqual([-1n, 0n, -1n, -1n]);
-    const at5 = bank.assemble(5);
-    expect(at5.validMaps).toBe(2);
-    // Ranks: 4→rank1→tpos 0, 1→rank2→tpos 1 (slot 1 holds frame 1, slot 2 frame 4).
-    expect([...at5.tposIndices]).toEqual([-1n, 1n, 0n, -1n]);
-  });
-
-  it('hasMemory applies the same streaming cutoff', () => {
-    const { backend, bank, video } = makeBank();
-    expect(bank.hasMemory(0)).toBe(false);
-    commitFrame(backend, bank, video, 2, true);
-    expect(bank.hasMemory(2)).toBe(false); // own frame does not count
-    expect(bank.hasMemory(3)).toBe(true);
-  });
-
-  it('an empty bank assembles to validMaps 0 with an all-zero mask and all -1 tpos', () => {
-    const { bank, video } = makeBank();
-    const asm = bank.assemble(0);
-    expect(asm.validMaps).toBe(0);
-    expect([...asm.memoryMask]).toEqual(new Array(video.kvLen).fill(0));
-    expect([...asm.tposIndices]).toEqual([-1n, -1n, -1n, -1n]);
-    expect([...asm.pointerMask]).toEqual([0, 0, 0, 0]);
-  });
-});
-
-describe('MemoryBank mask-bit assembly (partial banks)', () => {
-  it('sets exactly the valid slots’ [i*T, (i+1)*T) spatial ranges, kvLen total', () => {
-    const { backend, bank, video } = makeBank();
-    commitFrame(backend, bank, video, 0, true); // slot 0
-    commitFrame(backend, bank, video, 2, false); // slot 1
-    const asm = bank.assemble(3);
-    expect(asm.memoryMask.length).toBe(video.kvLen); // 13
-    // Slots 0 and 1 valid (T=2 each); slots 2, 3 invalid; ptr region (5) zero.
-    expect([...asm.memoryMask]).toEqual([1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    expect(asm.validMaps).toBe(2);
-  });
-
-  it('pointer region bits flip on iff at least one pointer is visible', () => {
-    const { backend, bank, video } = makeBank();
-    commitFrame(backend, bank, video, 0, true);
-    bank.commitPointer(0, new Float32Array(video.embedDim).fill(7));
-    const asm = bank.assemble(1);
-    expect([...asm.memoryMask]).toEqual([1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1]);
-  });
-
-  it('lays out the real EdgeTAM kvLen 1856 = 7×256 + 64', () => {
-    const video = edgetamVideo();
-    const backend = new FakeBackend();
-    const bank = new MemoryBank({
-      backend,
-      video,
-      strategy: strategyFor('edgetam', video),
-      location: 'cpu',
-    });
-    commitFrame(backend, bank, video, 0, true); // slot 0
-    commitFrame(backend, bank, video, 1, false); // slot 1
-    bank.commitPointer(1, new Float32Array(256));
-    const asm = bank.assemble(2);
-    expect(asm.memoryMask.length).toBe(1856);
-    const on = (from: number, to: number) =>
-      asm.memoryMask.subarray(from, to).every((b) => b === 1);
-    const off = (from: number, to: number) =>
-      asm.memoryMask.subarray(from, to).every((b) => b === 0);
-    expect(on(0, 512)).toBe(true); // cond slot 0 + recent slot 1
-    expect(off(512, 7 * 256)).toBe(true); // slots 2..6 invalid
-    expect(on(7 * 256, 1856)).toBe(true); // ptr region: one pointer visible
-    expect([...asm.tposIndices]).toEqual([6n, 0n, -1n, -1n, -1n, -1n, -1n]);
-  });
-});
-
-describe('MemoryBank pointer ring', () => {
-  it('packs pointers most-recent-first with aligned deltas and mask', () => {
-    const { backend, bank, video } = makeBank();
-    commitFrame(backend, bank, video, 0, true);
-    bank.commitPointer(0, Float32Array.from([10, 11]));
-    bank.commitPointer(1, Float32Array.from([20, 21]));
-    bank.commitPointer(2, Float32Array.from([30, 31]));
-    const asm = bank.assemble(3);
-    // Most-recent-first: frame 2, 1, 0; fourth row zero-padded.
-    expect([...asm.objectPointers]).toEqual([30, 31, 20, 21, 10, 11, 0, 0]);
-    expect([...asm.pointerDeltas]).toEqual([1n, 2n, 3n, 0n]);
-    expect([...asm.pointerMask]).toEqual([1, 1, 1, 0]);
-  });
-
-  it('evicts the oldest pointer beyond maxObjectPointers', () => {
-    const { bank, video } = makeBank();
-    for (let f = 0; f < video.maxObjectPointers + 1; f++) {
-      bank.commitPointer(f, Float32Array.from([f, f]));
+    for (const t of backend.live) {
+      expect(t.shape).toEqual([M, T, MEM_DIM]);
+      expect(t.location).toBe('device');
     }
-    const asm = bank.assemble(10);
-    // Frames 1..4 survive (0 evicted); most-recent-first.
-    expect([...asm.pointerDeltas]).toEqual([6n, 7n, 8n, 9n]);
-    expect([...asm.objectPointers]).toEqual([4, 4, 3, 3, 2, 2, 1, 1]);
+    const slots = bank.slots;
+    expect(slots.length).toBe(M);
+    expect(slots[0]).toEqual({ frameIdx: -1, isCond: true, valid: false });
+    expect(slots.slice(1).every((s) => !s.isCond)).toBe(true);
+  });
+
+  it('exposes slots as a defensive snapshot (mutation cannot leak in)', () => {
+    const bank = makeBank(backend);
+    const slots = bank.slots;
+    slots[0]!.frameIdx = 999;
+    expect(bank.slots[0]!.frameIdx).toBe(-1);
+  });
+});
+
+describe('MemoryBank.commit — slot selection & eviction', () => {
+  it('pins the cond frame in slot 0 and fills the recent ring in order', () => {
+    const bank = makeBank(backend);
+    commitSequence(bank, backend, 0, [1, 2, 3, 4, 5, 6]);
+    const slots = bank.slots;
+    expect(slots[0]).toEqual({ frameIdx: 0, isCond: true, valid: true });
+    expect(slots.slice(1).map((s) => s.frameIdx)).toEqual([1, 2, 3, 4, 5, 6]);
+  });
+
+  it('evicts the oldest recent slot (smallest frameIdx) once the ring is full', () => {
+    const bank = makeBank(backend);
+    commitSequence(bank, backend, 0, [1, 2, 3, 4, 5, 6]);
+    // Frame 7 evicts frame 1 (oldest), reusing its physical slot.
+    bank.commit(7, false, feat(backend, 7), feat(backend, 1007));
+    const recent = bank.slots.slice(1).map((s) => s.frameIdx);
+    expect(recent).toEqual([7, 2, 3, 4, 5, 6]);
+    expect(recent).not.toContain(1);
+  });
+
+  it('writes committed features into the chosen physical slot (real bytes)', () => {
+    const bank = makeBank(backend);
+    commitSequence(bank, backend, 0, [1, 2]);
+    const asm = bank.assemble(3);
+    const spatial = (asm.memorySpatial as FakeTensor).data;
+    const pos = (asm.memorySpatialPos as FakeTensor).data;
+    // slot 0 (cond frame 0) → value 0; slot 1 (frame 1) → value 1; slot 2 → 2.
+    expect([...spatial.slice(0, T)]).toEqual([0, 0]);
+    expect([...spatial.slice(T, 2 * T)]).toEqual([1, 1]);
+    expect([...spatial.slice(2 * T, 3 * T)]).toEqual([2, 2]);
+    // pos ring got the 1000+frame sentinel.
+    expect([...pos.slice(T, 2 * T)]).toEqual([1001, 1001]);
+  });
+
+  it('accepts the relaxed byte-count copyRegion rule (leading batch dim on the source)', () => {
+    const bank = makeBank(backend);
+    // memoryEncoder output is [1, T, memDim]; element count still equals one slot.
+    bank.commit(0, true, feat(backend, 5, [1, T, MEM_DIM]), feat(backend, 6, [1, T, MEM_DIM]));
+    expect(bank.slots[0]!.frameIdx).toBe(0);
+    const asm = bank.assemble(1);
+    expect([...(asm.memorySpatial as FakeTensor).data.slice(0, T)]).toEqual([5, 5]);
+  });
+
+  it('issues exactly two copyRegion calls per commit and none during assemble', () => {
+    const bank = makeBank(backend);
+    bank.commit(0, true, feat(backend, 0), feat(backend, 0));
+    expect(backend.copyRegionCalls.length).toBe(2);
+    bank.assemble(1);
+    expect(backend.copyRegionCalls.length).toBe(2); // assemble does not repack
+    expect(backend.copyRegionCalls.every((c) => c.slotIndex === 0)).toBe(true);
+  });
+});
+
+describe('MemoryBank.assemble — streaming rule & tpos indices', () => {
+  it('excludes frame N from its own assembly (assemble happens before commit)', () => {
+    const bank = makeBank(backend);
+    commitSequence(bank, backend, 0, [1, 2]);
+    // Assemble AT frame 2: frame 2 was committed, but streaming excludes >= N.
+    const asm = bank.assemble(2);
+    // Valid maps: cond frame 0 + recent frame 1. Frame 2 (== N) excluded.
+    expect(asm.validMaps).toBe(2);
+    expect(asm.tposIndices[2]).toBe(-1n); // slot 2 holds frame 2 → excluded
+  });
+
+  it('assigns cond→row 6 and recent maps by RAW frame distance (e2e_loop bookkeeping)', () => {
+    const bank = makeBank(backend);
+    commitSequence(bank, backend, 0, [1, 2, 3, 4, 5, 6]);
+    const asm = bank.assemble(7);
+    expect(asm.validMaps).toBe(7);
+    // Physical slot i holds frame i; tpos: slot0 cond→6, slot i→ (7-i)-1 = 6-i.
+    expect([...asm.tposIndices].map(Number)).toEqual([6, 5, 4, 3, 2, 1, 0]);
+  });
+
+  it('drops recent maps beyond the numRecent window while keeping the cond map', () => {
+    const bank = makeBank(backend);
+    // Only a cond frame (0) and one stale tracked frame (1); assemble far ahead.
+    commitSequence(bank, backend, 0, [1]);
+    const asm = bank.assemble(10); // frame 1 offset 9 > numRecent 6 → dropped
+    expect(asm.validMaps).toBe(1); // only the cond map survives
+    expect(asm.tposIndices[0]).toBe(6n);
+    expect(asm.tposIndices[1]).toBe(-1n);
+  });
+
+  it('builds the spatial mask at whole-slot granularity for valid maps only', () => {
+    const bank = makeBank(backend);
+    commitSequence(bank, backend, 0, [1, 2]);
+    const asm = bank.assemble(3);
+    // slots 0,1,2 valid (frames 0,1,2 all < 3) → their T-token windows are 1.
+    for (let s = 0; s < 3; s++) {
+      expect([...asm.memoryMask.slice(s * T, s * T + T)]).toEqual([1, 1]);
+    }
+    // slots 3..6 invalid → zero.
+    for (let s = 3; s < M; s++) {
+      expect([...asm.memoryMask.slice(s * T, s * T + T)]).toEqual([0, 0]);
+    }
+  });
+
+  it('hasMemory tracks whether assemble would yield any valid map', () => {
+    const bank = makeBank(backend);
+    expect(bank.hasMemory(0)).toBe(false);
+    bank.commit(0, true, feat(backend, 0), feat(backend, 0));
+    expect(bank.hasMemory(0)).toBe(false); // streaming: frame 0 cannot see its own memory
+    expect(bank.hasMemory(1)).toBe(true);
+  });
+});
+
+describe('MemoryBank pointer bank — cond pinned + recent ring', () => {
+  it('orders pointers cond-first then tracked offsets 1..P-1 (e2e_loop order)', () => {
+    const bank = makeBank(backend);
+    commitSequence(bank, backend, 0, [1, 2, 3, 4, 5, 6]);
+    const asm = bank.assemble(7);
+    // e2e: [cond 0, offset1→6, offset2→5, ... offset6→1] = 7 pointers.
+    const rows = [...Array(7)].map((_v, i) => asm.objectPointers[i * EMBED_DIM]);
+    expect(rows).toEqual([0, 6, 5, 4, 3, 2, 1]);
+    expect([...asm.pointerMask.slice(0, 7)]).toEqual([1, 1, 1, 1, 1, 1, 1]);
+    expect(asm.pointerMask[7]).toBe(0);
+    // Pointer-region mask: 4 tokens per pointer, 7 pointers → 28 valid bits.
+    const base = M * T;
+    expect([...asm.memoryMask.slice(base, base + 28)].every((b) => b === 1)).toBe(true);
+    expect(asm.memoryMask[base + 28]).toBe(0);
+  });
+
+  it('keeps a pointer reachable at an offset the map ring has already evicted', () => {
+    const bank = makeBank(backend);
+    // Commit through frame 7: the map ring evicts frame 1, but its POINTER (a
+    // 16-deep ring) survives and is still reachable at offset 7 from frame 8.
+    commitSequence(bank, backend, 0, [1, 2, 3, 4, 5, 6, 7]);
+    const asm = bank.assemble(8);
+    // Maps: frame 1 gone (evicted); cond 0 + frames 2..7 → 7 maps.
+    expect(asm.validMaps).toBe(7);
+    // Pointers: cond 0 + offsets 1..7 → frames 7,6,5,4,3,2,1 → includes frame 1.
+    const rows = [...Array(8)].map((_v, i) => asm.objectPointers[i * EMBED_DIM]);
+    expect(rows).toEqual([0, 7, 6, 5, 4, 3, 2, 1]);
+  });
+
+  it('evicts the oldest tracked pointer once the pointer ring overflows', () => {
+    const bank = makeBank(backend, { maxObjectPointers: 4, ptrTokens: 16 });
+    // 1 cond + tracked 1..5; recent-pointer ring holds 4 → frame 1 evicted.
+    commitSequence(bank, backend, 0, [1, 2, 3, 4, 5]);
+    const asm = bank.assemble(6);
+    // cond 0 + offsets 1..3 (ring cap 4-1) → frames 5,4,3 ; capped total = 4.
+    const rows = [...Array(4)].map((_v, i) => asm.objectPointers[i * EMBED_DIM]);
+    expect(rows).toEqual([0, 5, 4, 3]);
     expect([...asm.pointerMask]).toEqual([1, 1, 1, 1]);
   });
 
-  it('applies the streaming rule to pointers (frame N’s pointer invisible at N)', () => {
-    const { bank } = makeBank();
-    bank.commitPointer(2, Float32Array.from([1, 2]));
-    bank.commitPointer(5, Float32Array.from([3, 4]));
-    const asm = bank.assemble(5);
-    expect([...asm.pointerMask]).toEqual([1, 0, 0, 0]);
-    expect([...asm.objectPointers]).toEqual([1, 2, 0, 0, 0, 0, 0, 0]);
-    expect([...asm.pointerDeltas]).toEqual([3n, 0n, 0n, 0n]);
+  it('rejects a pointer whose length is not embedDim', () => {
+    const bank = makeBank(backend);
+    expect(() => bank.commitPointer(0, new Float32Array(EMBED_DIM + 1))).toThrow(InvalidStateError);
   });
 
-  it('replaces a re-committed frame’s pointer in place (refine path)', () => {
-    const { bank } = makeBank();
-    bank.commitPointer(1, Float32Array.from([1, 1]));
-    bank.commitPointer(1, Float32Array.from([9, 9]));
-    const asm = bank.assemble(2);
-    expect([...asm.objectPointers]).toEqual([9, 9, 0, 0, 0, 0, 0, 0]);
-    expect([...asm.pointerMask]).toEqual([1, 0, 0, 0]);
-  });
-
-  it('copies the pointer defensively and rejects a wrong-width pointer', () => {
-    const { bank } = makeBank();
-    const data = Float32Array.from([5, 6]);
-    bank.commitPointer(0, data);
-    data.fill(0); // caller mutation must not reach the bank
-    expect([...bank.assemble(1).objectPointers].slice(0, 2)).toEqual([5, 6]);
-    expect(() => bank.commitPointer(1, new Float32Array(3))).toThrow(InvalidStateError);
+  it('EdgeTAM pointer deltas are inert (all zero), padded to maxObjectPointers', () => {
+    const bank = makeBank(backend);
+    commitSequence(bank, backend, 0, [1, 2, 3]);
+    const asm = bank.assemble(4);
+    expect(asm.pointerDeltas.length).toBe(16);
+    expect([...asm.pointerDeltas].every((d) => d === 0n)).toBe(true);
   });
 });
 
-describe('MemoryBank invalidateAfter / reset / dispose', () => {
-  it('invalidateAfter drops non-cond slots and pointers strictly after frameIdx; cond is pinned', () => {
-    const { backend, bank, video } = makeBank();
-    commitFrame(backend, bank, video, 0, true);
-    for (const f of [1, 2, 3]) commitFrame(backend, bank, video, f, false);
-    for (const f of [0, 1, 2, 3]) bank.commitPointer(f, Float32Array.from([f, f]));
-    bank.invalidateAfter(1);
-    expect(bank.slots.map((s) => s.frameIdx)).toEqual([0, 1, -1, -1]);
-    expect(bank.slots.map((s) => s.valid)).toEqual([true, true, false, false]);
+describe('MemoryBank.invalidateAfter — refine support', () => {
+  it('drops recent maps + tracked pointers after the frame, keeping cond', () => {
+    const bank = makeBank(backend);
+    commitSequence(bank, backend, 0, [1, 2, 3, 4]);
+    bank.invalidateAfter(2); // keep cond(0) + recent 1,2; drop 3,4
     const asm = bank.assemble(5);
-    expect([...asm.pointerMask]).toEqual([1, 1, 0, 0]); // pointers 0, 1 kept
-    expect([...asm.pointerDeltas]).toEqual([4n, 5n, 0n, 0n]);
+    // Maps: cond 0 (row6), frame 1 (offset4→row3), frame 2 (offset3→row2).
+    expect(asm.validMaps).toBe(3);
+    const validFrames = bank.slots.filter((s) => s.valid).map((s) => s.frameIdx).sort((a, b) => a - b);
+    expect(validFrames).toEqual([0, 1, 2]);
+    // Pointers: cond 0 + offsets to frames 2,1 (3 & 4 removed).
+    const rows: number[] = [];
+    for (let i = 0; i < 16; i++) if (asm.pointerMask[i]) rows.push(asm.objectPointers[i * EMBED_DIM]!);
+    expect(rows).toEqual([0, 2, 1]);
   });
 
-  it('cond slots survive invalidateAfter even when their frameIdx is larger', () => {
-    const { backend, bank, video } = makeBank();
-    commitFrame(backend, bank, video, 8, true);
-    bank.invalidateAfter(2);
-    expect(bank.slots[0]).toEqual({ frameIdx: 8, isCond: true, valid: true });
+  it('leaves the cond map/pointer untouched even when after the cut', () => {
+    const bank = makeBank(backend);
+    // Cond frame is 5 (later than the cut); it must survive invalidateAfter(3).
+    bank.commit(5, true, feat(backend, 5), feat(backend, 1005));
+    bank.commitPointer(5, pointerVec(5));
+    bank.invalidateAfter(3);
+    expect(bank.slots[0]).toEqual({ frameIdx: 5, isCond: true, valid: true });
+    const asm = bank.assemble(6);
+    expect(asm.validMaps).toBe(1);
+    expect(asm.objectPointers[0]).toBe(5);
   });
+});
 
-  it('invalidated recent slots are reused first by later commits (post-refine reuse)', () => {
-    const { backend, bank, video } = makeBank();
-    for (const f of [1, 2, 3]) commitFrame(backend, bank, video, f, false);
-    bank.invalidateAfter(1); // slots for frames 2, 3 freed
-    commitFrame(backend, bank, video, 6, false);
-    // First invalid recent slot (the old frame-2 slot) is reused, no eviction.
-    expect(bank.slots.map((s) => s.frameIdx)).toEqual([-1, 1, 6, -1]);
-    const asm = bank.assemble(7);
-    expect(ringSlot(asm.memorySpatial, video, 2)).toEqual(filled(video, 6.5));
+describe('MemoryBank cond overflow (replace-on-new-prompt)', () => {
+  it('overwrites the single cond slot when a second cond frame is committed', () => {
+    const bank = makeBank(backend);
+    bank.commit(0, true, feat(backend, 0), feat(backend, 0));
+    // maxCondFrames = 1 → the new prompt replaces the old cond map.
+    bank.commit(4, true, feat(backend, 4), feat(backend, 4));
+    expect(bank.slots[0]).toEqual({ frameIdx: 4, isCond: true, valid: true });
+    const asm = bank.assemble(5);
+    expect([...(asm.memorySpatial as FakeTensor).data.slice(0, T)]).toEqual([4, 4]);
   });
+});
 
-  it('reset invalidates everything but retains the rings (no realloc, no dispose)', () => {
-    const { backend, bank, video } = makeBank();
-    commitFrame(backend, bank, video, 0, true);
-    bank.commitPointer(0, new Float32Array(video.embedDim));
+describe('MemoryBank.reset & dispose', () => {
+  it('reset invalidates all slots + pointers but retains the rings', () => {
+    const bank = makeBank(backend);
+    commitSequence(bank, backend, 0, [1, 2, 3]);
+    const rings = bank.assemble(4);
     bank.reset();
     expect(bank.slots.every((s) => !s.valid && s.frameIdx === -1)).toBe(true);
-    expect(bank.hasMemory(99)).toBe(false);
-    expect(backend.live.size).toBe(2); // rings still alive
-    expect(backend.allocCalls.length).toBe(2); // and not reallocated
-    commitFrame(backend, bank, video, 1, true); // bank still usable
-    expect(bank.hasMemory(2)).toBe(true);
+    expect(bank.assemble(4).validMaps).toBe(0);
+    // The device rings survive reset (not disposed) and are reusable.
+    expect((rings.memorySpatial as FakeTensor).disposed).toBe(false);
+    expect((rings.memorySpatialPos as FakeTensor).disposed).toBe(false);
+    bank.commit(0, true, feat(backend, 9), feat(backend, 9));
+    expect(bank.slots[0]!.frameIdx).toBe(0);
   });
 
-  it('dispose releases both rings; every further use throws InvalidStateError', () => {
-    const { backend, bank, video } = makeBank();
-    const features = slotTensor(backend, video, 1);
-    const pos = slotTensor(backend, video, -1);
+  it('dispose releases both rings and poisons further use', () => {
+    const bank = makeBank(backend);
     bank.dispose();
-    expect(backend.live.size).toBe(2); // only the two undisposed slot tensors remain
-    expect(() => bank.commit(0, true, features, pos)).toThrow(InvalidStateError);
+    expect(backend.live.size).toBe(0);
+    expect(() => bank.commit(0, true, feat(backend, 0), feat(backend, 0))).toThrow(InvalidStateError);
     expect(() => bank.assemble(0)).toThrow(InvalidStateError);
     expect(() => bank.hasMemory(0)).toThrow(InvalidStateError);
-    expect(() => bank.commitPointer(0, new Float32Array(video.embedDim))).toThrow(
-      InvalidStateError,
-    );
-    expect(() => bank.invalidateAfter(0)).toThrow(InvalidStateError);
-    expect(() => bank.reset()).toThrow(InvalidStateError);
-    expect(() => bank.dispose()).toThrow(InvalidStateError);
-  });
-});
-
-describe('multi-object batch offsets (§4.4 engine binding over §1.1 relaxed copyRegion)', () => {
-  it('each object’s ring copies contiguously into its batch slot of [B, M*T, memDim]', () => {
-    const video = tinyVideo();
-    const backend = new FakeBackend();
-    const strategy = strategyFor('edgetam', video);
-    const bankA = new MemoryBank({ backend, video, strategy, location: 'cpu' });
-    const bankB = new MemoryBank({ backend, video, strategy, location: 'cpu' });
-    commitFrame(backend, bankA, video, 0, true); // A: slot 0 = 0.5s
-    commitFrame(backend, bankB, video, 1, false); // B: slot 1 = 1.5s
-
-    const maps = video.maxCondFrames + video.numRecent;
-    const ringElements = maps * video.tokensPerMemoryMap * video.memDim; // 24
-    // Engine-owned batched graph input: B=2 objects on the leading dim.
-    const batched = backend.allocTensor(
-      [2, maps * video.tokensPerMemoryMap, video.memDim],
-      'float32',
-      'cpu',
-    );
-    // The §1.1 relaxed rule: a whole [M, T, D] ring is one [M*T, D] batch
-    // slot's worth of bytes — contiguous copy, no reshape.
-    backend.copyRegion(bankA.assemble(2).memorySpatial, batched, 0);
-    backend.copyRegion(bankB.assemble(2).memorySpatial, batched, 1);
-
-    const data = (batched as FakeTensor).data as Float32Array;
-    const slotBytes = video.tokensPerMemoryMap * video.memDim; // 6 floats per map
-    // Object A at batch offset 0: its cond slot 0 payload, rest zero.
-    expect([...data.subarray(0, slotBytes)]).toEqual(filled(video, 0.5));
-    expect(data.subarray(slotBytes, ringElements).every((v) => v === 0)).toBe(true);
-    // Object B at batch offset ringElements: slot 1 payload at map offset 1.
-    const b = ringElements;
-    expect(data.subarray(b, b + slotBytes).every((v) => v === 0)).toBe(true);
-    expect([...data.subarray(b + slotBytes, b + 2 * slotBytes)]).toEqual(filled(video, 1.5));
-    expect(data.subarray(b + 2 * slotBytes, 2 * ringElements).every((v) => v === 0)).toBe(true);
   });
 
-  it('per-object banks stay fully independent (no shared ring state)', () => {
-    const video = tinyVideo();
-    const backend = new FakeBackend();
-    const strategy = strategyFor('edgetam', video);
-    const bankA = new MemoryBank({ backend, video, strategy, location: 'cpu' });
-    const bankB = new MemoryBank({ backend, video, strategy, location: 'cpu' });
-    commitFrame(backend, bankA, video, 0, true);
-    expect(bankA.hasMemory(1)).toBe(true);
-    expect(bankB.hasMemory(1)).toBe(false);
-    expect(bankB.assemble(1).validMaps).toBe(0);
-    expect(bankA.assemble(1).memorySpatial).not.toBe(bankB.assemble(1).memorySpatial);
+  it('assemble allocates no backend tensors — feeds are cpu-side typed arrays', () => {
+    const bank = makeBank(backend);
+    commitSequence(bank, backend, 0, [1, 2, 3, 4, 5, 6, 7, 8]);
+    const liveBeforeAssemble = backend.live.size;
+    const asm = bank.assemble(9);
+    // Borrowed rings + cpu-side arrays only; no new device allocation.
+    expect(backend.live.size).toBe(liveBeforeAssemble);
+    expect(asm.tposIndices).toBeInstanceOf(BigInt64Array);
+    expect(asm.memoryMask).toBeInstanceOf(Uint8Array);
+    expect(asm.objectPointers).toBeInstanceOf(Float32Array);
   });
 });

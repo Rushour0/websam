@@ -138,15 +138,15 @@ export interface Backend {
    * ring of past-frame features; each tracked frame overwrites the oldest
    * slot with exactly this call.
    *
-   * Slot-shape rule (M2, relaxed): `src` must have exactly
-   * `dst.shape.slice(1)`'s ELEMENT COUNT and the same dtype — the copy is a
-   * contiguous byte copy, reshape-free. Literal shape equality is NOT
-   * required: the video engine copies a whole per-object KV ring
-   * (`[S, T, D]`) into one batch slot of a `[B, S*T, D]` graph input, and
-   * requiring shape equality would force pointless reshapes on an opaque
-   * handle.
+   * The copy is a **contiguous byte copy (reshape-free)**: `src` must have the
+   * same {@link DType} as `dst` and exactly `dst.shape.slice(1)`'s element
+   * count, but its logical *shape* need not literally equal one slot. This
+   * relaxation (M2) lets the video engine copy a whole per-object KV ring
+   * (`[S, T, D]`) into one batch slot of a `[B, S*T, D]` graph input without
+   * pointless reshapes on an opaque handle — the byte count is what matters.
    *
-   * @param src - Tensor with `dst.shape.slice(1)`'s element count and the same dtype as `dst`.
+   * @param src - Tensor with `dst`'s dtype and one slot's worth of elements
+   * (`prod(dst.shape.slice(1))`), copied verbatim into the destination slot.
    * @param dst - Ring tensor; `dst.shape[0]` is the slot count.
    * @param slotIndex - Slot to overwrite, in `[0, dst.shape[0])`.
    */
@@ -159,9 +159,18 @@ export interface Backend {
    */
   readback(tensor: DeviceTensor): Promise<ArrayBufferView>;
 
-  /** Live-resource census for leak gates. Optional; browser backends implement it in M2. */
-  debugStats?(): { liveTensors: number; liveBytes: number };
-
   /** Release the device and every resource this backend still owns. */
   dispose(): Promise<void>;
+
+  /**
+   * Live-resource census for leak gates. Optional; the browser backends
+   * implement it in M2. Counts every tensor the backend itself still holds
+   * (uploaded via {@link uploadTensor} or allocated via {@link allocTensor}
+   * and not yet disposed) and their aggregate byte size. This is the
+   * flatness witness for the video loop: after the loop reaches steady state
+   * the census must be identical at every frame boundary (§4.5). Run outputs
+   * are owned by their {@link BackendSession} and are not part of this
+   * census.
+   */
+  debugStats?(): { liveTensors: number; liveBytes: number };
 }

@@ -15,6 +15,25 @@ export interface MaskTimelineInit {
 }
 
 /**
+ * Options for {@link MaskTimeline.collect}.
+ */
+export interface CollectOptions {
+  /**
+   * Called after each frame's masks have been stored. Lets a UI render live
+   * from the same single iterator consumer (the propagation iterator contract
+   * allows only one consumer).
+   */
+  onFrame?: (frame: FramePropagationResult) => void;
+  /**
+   * Epoch stamped into every {@link MaskTimeline.set}. Pairs with
+   * {@link MaskTimeline.invalidateAfter} for the refine flow: a re-collect
+   * under a newer epoch supersedes stale masks, and a straggler carrying an
+   * older epoch is rejected.
+   */
+  epoch?: number;
+}
+
+/**
  * Optional frame range for {@link MaskTimeline.holes}.
  */
 export interface FrameRange {
@@ -228,34 +247,33 @@ export class MaskTimeline {
   }
 
   /**
-   * Drain a propagation stream (e.g. `session.propagate()`) into a timeline.
+   * Drain a propagation iterator into a fresh timeline, storing every yielded
+   * mask by object id and frame index.
    *
-   * `collect` is the stream's SINGLE consumer — the `propagate()` iterator
-   * contract allows no second one. Use `options.onFrame` to observe frames
-   * from that same consumer (the demo renders live this way). Each mask is
-   * stored as `set(String(mask.objectId), frame.frameIndex, mask.toRLE(),
-   * options.epoch)`, so a stale `options.epoch` is rejected per the
-   * {@link set} contract instead of resurrecting old masks.
+   * This is the single-consumer bridge from
+   * `VideoSession.propagate()` to timeline storage: the iterator contract
+   * permits exactly one consumer, and `collect` is it. Frames with no mask for
+   * an object simply leave that frame a hole — sparse tracks are normal (e.g.
+   * from a cancelled propagation) and are never treated as an error. Late
+   * masks carrying a stale epoch are dropped by {@link set} (which returns
+   * `false`), so they are silently skipped rather than resurrecting invalid
+   * state.
    *
-   * Errors thrown by the stream — notably `EpochInvalidatedError` after a
-   * mid-flight `refineObject` — propagate to the caller, who refines, calls
-   * {@link invalidateAfter}, and re-collects into the SAME timeline under
-   * the new epoch. To support that, `init` may be an existing
-   * {@link MaskTimeline} (it satisfies {@link MaskTimelineInit}
-   * structurally): frames are then collected into it rather than into a
-   * fresh timeline. Masks stored before the error remain stored.
+   * If the iterator throws — notably `EpochInvalidatedError` after a
+   * `refineObject` — the rejection propagates to the caller, who typically
+   * refines, calls {@link invalidateAfter}, and re-collects into the SAME
+   * timeline under the new epoch.
+   *
+   * @param frames - The async iterable to drain (e.g. `session.propagate()`).
+   * @param init - Geometry for the new timeline.
+   * @param options - Optional live-render callback and write epoch.
    */
   static async collect(
     frames: AsyncIterable<FramePropagationResult>,
     init: MaskTimelineInit,
-    options?: {
-      /** Called after each frame is stored — lets the demo render live from the same single consumer. */
-      onFrame?: (frame: FramePropagationResult) => void;
-      /** Epoch stamped into set(); pairs with invalidateAfter for the refine flow. */
-      epoch?: number;
-    },
+    options?: CollectOptions,
   ): Promise<MaskTimeline> {
-    const timeline = init instanceof MaskTimeline ? init : new MaskTimeline(init);
+    const timeline = new MaskTimeline(init);
     for await (const frame of frames) {
       for (const mask of frame.masks) {
         timeline.set(String(mask.objectId), frame.frameIndex, mask.toRLE(), options?.epoch);

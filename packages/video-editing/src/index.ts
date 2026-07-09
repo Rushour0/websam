@@ -9,6 +9,7 @@ export {
   type MaskTimelineInit,
   type MaskTimelineJSON,
   type FrameRange,
+  type CollectOptions,
   type SerializedRLEMask,
 } from './timeline.js';
 export {

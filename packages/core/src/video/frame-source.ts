@@ -1,94 +1,99 @@
 /**
- * The worker-side frame-source contract — how the video engine pulls decoded
- * frames out of an attached video (docs/m2-internal-contracts.md §4/§5).
+ * The worker-side frame-source abstraction (M2 video path).
  *
- * A {@link FrameSource} lives entirely IN THE WORKER: the main thread hands a
- * `Blob` across the boundary (Blobs structured-clone by reference — no byte
- * copy) and never touches demux or decode. The engine drives the source two
- * ways:
+ * WHY THIS EXISTS: the video engine ({@link ../worker/video/video-engine.ts})
+ * must decode video frames on demand — one at a time for interaction
+ * (`addObject`/`refineObject`) and sequentially for propagation — without
+ * knowing anything about container demuxing or WebCodecs. Behind
+ * {@link FrameSource}, a frame is an opaque {@link VideoFrame} the engine
+ * preprocesses and then closes; where it came from (an MP4 + `VideoDecoder`
+ * today, an `HTMLVideoElement` at M4, a Node decoder at M5) is invisible.
  *
- * - `read(start, end)` — the propagation loop's sequential forward pass. The
- *   iterator is PULL-DRIVEN: decoding only advances while the consumer keeps
- *   calling `next()`, so when the propagation port runs out of credits
- *   (§5.2) the source stops feeding the decoder — decode pauses, buffers
- *   held. That is the documented stall semantics.
- * - `frameAt(i)` — random access for interaction steps (`addObject` /
- *   `refineObject`). GOP-aware: the source seeks to the preceding sync
- *   sample and decodes forward, discarding warm-up frames.
- *
- * Ownership rule (§4.5): every {@link VideoFrame} handed out is owned by the
- * CALLER, who must `frame.close()` it (the engine closes after preprocess).
- * Frames still held inside the source (decoded but not yet yielded) are the
- * source's responsibility and are closed on cancellation/disposal.
+ * OWNERSHIP CONTRACT: every {@link VideoFrame} handed out by a `FrameSource`
+ * (from {@link FrameSource.frameAt} or a {@link DecodedFrame} yielded by
+ * {@link FrameSource.read}) transfers ownership to the caller, who MUST call
+ * `frame.close()` exactly once. Frames the source decodes but does not hand
+ * out — out-of-range decode products, or the tail of a `read()` that is
+ * abandoned via `return()`/`break` — are closed by the source itself, so an
+ * interrupted read never leaks frames.
  */
 
 /**
- * Metadata for an attached video source.
- *
- * Structurally identical to the `VideoSourceInfo` the worker protocol ships
- * to the main thread (m2-internal-contracts.md §5.1, added to
- * `src/worker/protocol.ts` in wave 2) — that copy is authoritative for the
- * wire; this one must never drift from it.
+ * Container-derived facts about an attached video, computed once at demux
+ * time. Mirrors the structured-clone-safe wire shape carried by the worker
+ * protocol (`src/worker/protocol.ts`, worker-video wave 2); that module
+ * should import this type rather than redeclare it so there is one source of
+ * truth for the shape.
  */
 export interface VideoSourceInfo {
-  /** Exact frame count from the mp4 sample table (mp4box counts samples). */
+  /** Exact frame count, from the MP4 sample table (mp4box counts samples). */
   frameCount: number;
-  /** `frameCount / durationSeconds` — VFR clips are flattened to one rate. */
+  /** `frameCount / durationSeconds`. Variable frame rates are flattened to this average. */
   fps: number;
+  /** Coded frame width in pixels. */
   width: number;
+  /** Coded frame height in pixels. */
   height: number;
+  /** Total presentation duration in microseconds. */
   durationUs: number;
-  /** Codec string of the video track, e.g. `'avc1.640028'`. */
+  /** WebCodecs codec string, e.g. `'avc1.64100b'`. */
   codec: string;
 }
 
-/** One decoded frame yielded by {@link FrameSource.read}. */
+/**
+ * One decoded frame in presentation (display) order. `frame` ownership
+ * transfers to the caller (see the module-level ownership contract).
+ */
 export interface DecodedFrame {
-  /** Presentation-order frame index, `[0, info.frameCount)`. */
+  /** The decoded frame; the caller MUST call `frame.close()` exactly once. */
+  frame: VideoFrame;
+  /** Zero-based presentation index into the sample table, in `[0, frameCount)`. */
   frameIndex: number;
   /** Presentation timestamp in microseconds (equals `frame.timestamp`). */
   timestampUs: number;
-  /** The decoded frame — OWNED BY THE CALLER, who must `close()` it. */
-  frame: VideoFrame;
 }
 
 /**
- * A demuxed, seekable, worker-owned view of one video track.
- *
- * Implementations: {@link ../video/webcodecs-source.js | WebCodecsFrameSource}
- * (mp4box demux + `VideoDecoder`). At most ONE read iterator may be active at
- * a time (`read`/`frameAt` while another read is in flight throw
- * `InvalidStateError`) — the engine is strictly sequential per session, so
- * this is a programming-error guard, not a scheduling primitive.
+ * A half-open presentation-frame span `[startFrame, endFrame)`. Both bounds
+ * are optional in {@link FrameSource.read}: `startFrame` defaults to `0`,
+ * `endFrame` to {@link VideoSourceInfo.frameCount}.
+ */
+export interface FrameRange {
+  /** Inclusive first presentation frame. */
+  startFrame: number;
+  /** Exclusive last presentation frame. */
+  endFrame: number;
+}
+
+/**
+ * A demuxed, decodable video source. One instance backs one attached video
+ * for the lifetime of a video session.
  */
 export interface FrameSource {
-  /** Metadata derived from the container at attach time. */
+  /** Container facts computed at demux time. */
   readonly info: VideoSourceInfo;
+
   /**
-   * Sequential forward read of presentation frames `[startFrame, endFrame)`.
-   *
-   * Backpressure-aware: chunks are fed to the decoder only while the
-   * consumer pulls, bounded by a small watermark — an un-pulled iterator
-   * holds at most a few decoded frames. `return()` (or `throw()`) cancels
-   * mid-stream: the decoder is closed and every frame still held by the
-   * source is closed; frames already yielded stay the caller's to close.
-   *
-   * @throws InvalidStateError — bounds outside `[0, frameCount]`, a read
-   * already active, or the source is disposed.
-   */
-  read(startFrame: number, endFrame: number): AsyncIterableIterator<DecodedFrame>;
-  /**
-   * Decode exactly one frame (GOP-aware random access): seek to the nearest
-   * preceding sync sample, decode forward, discard warm-up frames. The
-   * returned frame is owned by the caller.
-   *
-   * @throws InvalidStateError — out-of-range index, a read already active,
-   * or the source is disposed.
+   * Decode a single frame by presentation index (random access; the
+   * interaction path). GOP-aware: seeks to the enclosing keyframe and decodes
+   * forward internally. Ownership of the returned frame transfers to the
+   * caller. Throws `InvalidStateError` if `frameIndex` is out of range or the
+   * source is closed.
    */
   frameAt(frameIndex: number): Promise<VideoFrame>;
+
   /**
-   * Release the decoder and every frame the source still holds. Idempotent;
-   * any later `read`/`frameAt` throws `InvalidStateError`.
+   * Sequential forward read over `[startFrame, endFrame)` in presentation
+   * order (the propagation path). Lazy and backpressure-aware: frames are
+   * decoded a GOP at a time and the generator suspends between GOPs, so a
+   * consumer that stops pulling stops the decoder. Each yielded
+   * {@link DecodedFrame} transfers frame ownership to the caller; calling
+   * `return()` (or `break`ing a `for await`) closes any frames the source has
+   * decoded but not yet yielded. Throws `InvalidStateError` if the source is
+   * closed.
    */
-  dispose(): void;
+  read(range?: Partial<FrameRange>): AsyncIterableIterator<DecodedFrame>;
+
+  /** Release demux state. Idempotent; later `frameAt`/`read` throw `InvalidStateError`. */
+  close(): Promise<void>;
 }

@@ -3,147 +3,120 @@ import { InvalidStateError, NotImplementedError } from '../../errors.js';
 import type { VideoManifestSection } from '../../weights/manifest.js';
 import { strategyFor } from './arch-strategy.js';
 
-/** Real EdgeTAM constants (tools/export/src/websam_export/spec.py EDGETAM_1024). */
-function edgetamVideo(): VideoManifestSection {
+/** EdgeTAM video section (FINDINGS.md values); override per test. */
+function video(overrides: Partial<VideoManifestSection> = {}): VideoManifestSection {
   return {
     maxCondFrames: 1,
     numRecent: 6,
-    tokensPerMemoryMap: 256,
+    tokensPerMemoryMap: 512,
     ptrTokens: 64,
     maxObjectPointers: 16,
-    kvLen: 7 * 256 + 64, // 1856
+    kvLen: 3648,
     memDim: 64,
     embedDim: 256,
     gridSize: 64,
     multiObjectBatch: true,
-    initPath: 'noMemFlag',
-    tposDelivery: 'indices',
+    initPath: 'noMemGraph',
+    tposDelivery: 'precombined',
     occlusionThreshold: 0,
+    ...overrides,
   };
 }
 
+const edgetam = () => strategyFor('edgetam', video());
+
 describe('strategyFor', () => {
-  it('returns an edgetam strategy carrying the arch tag', () => {
-    const strategy = strategyFor('edgetam', edgetamVideo());
-    expect(strategy.arch).toBe('edgetam');
+  it('builds the EdgeTAM strategy', () => {
+    const s = edgetam();
+    expect(s.arch).toBe('edgetam');
+    // e2e_loop.py commits memory on every tracked frame (no occlusion gate).
+    expect(s.commitOccludedMemory).toBe(true);
   });
 
-  it('throws NotImplementedError for sam3-tracker (branch lands in M3)', () => {
-    let caught: unknown;
-    try {
-      strategyFor('sam3-tracker', edgetamVideo());
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(NotImplementedError);
-    expect((caught as NotImplementedError).code).toBe('NOT_IMPLEMENTED');
-    expect((caught as NotImplementedError).message).toContain('M3');
-  });
-
-  it('commitOccludedMemory is a strategy field (⚠ PIN-8), true for edgetam pending the spike', () => {
-    expect(strategyFor('edgetam', edgetamVideo()).commitOccludedMemory).toBe(true);
+  it('defers SAM3 tracker to M3', () => {
+    expect(() => strategyFor('sam3-tracker', video())).toThrow(NotImplementedError);
   });
 });
 
-describe('tposIndex (spec.py::tpos_index case table)', () => {
-  const strategy = strategyFor('edgetam', edgetamVideo());
+describe('EdgeTAM tposIndex — the spec.py::tpos_index case table', () => {
+  const s = edgetam();
 
-  it('conditioning memories use the dedicated last slot: numRecent (6)', () => {
-    expect(strategy.tposIndex({ isCond: true })).toBe(6);
-    // recentOffset is irrelevant for cond entries (spec.py ignores it too).
-    expect(strategy.tposIndex({ isCond: true, recentOffset: 3 })).toBe(6);
+  it('maps conditioning memories to the dedicated last slot (numRecent)', () => {
+    expect(s.tposIndex({ isCond: true })).toBe(6);
+    // recentOffset is ignored for cond entries.
+    expect(s.tposIndex({ isCond: true, recentOffset: 3 })).toBe(6);
   });
 
-  it('recent memory at recency rank k → index k-1, for every valid k', () => {
+  it('maps recent offset k to row k-1 across the whole window', () => {
     for (let k = 1; k <= 6; k++) {
-      expect(strategy.tposIndex({ isCond: false, recentOffset: k })).toBe(k - 1);
+      expect(s.tposIndex({ isCond: false, recentOffset: k })).toBe(k - 1);
     }
   });
 
-  it('throws when recentOffset is missing for a non-cond memory', () => {
-    expect(() => strategy.tposIndex({ isCond: false })).toThrow(InvalidStateError);
+  it('throws on a missing recentOffset for a non-conditioning memory', () => {
+    expect(() => s.tposIndex({ isCond: false })).toThrow(InvalidStateError);
   });
 
-  it('throws when recentOffset is out of [1, numRecent] or not an integer', () => {
-    expect(() => strategy.tposIndex({ isCond: false, recentOffset: 0 })).toThrow(
-      InvalidStateError,
-    );
-    expect(() => strategy.tposIndex({ isCond: false, recentOffset: 7 })).toThrow(
-      InvalidStateError,
-    );
-    expect(() => strategy.tposIndex({ isCond: false, recentOffset: 1.5 })).toThrow(
-      InvalidStateError,
-    );
+  it('throws on an out-of-range or non-integer recentOffset', () => {
+    expect(() => s.tposIndex({ isCond: false, recentOffset: 0 })).toThrow(InvalidStateError);
+    expect(() => s.tposIndex({ isCond: false, recentOffset: 7 })).toThrow(InvalidStateError);
+    expect(() => s.tposIndex({ isCond: false, recentOffset: -1 })).toThrow(InvalidStateError);
+    expect(() => s.tposIndex({ isCond: false, recentOffset: 2.5 })).toThrow(InvalidStateError);
   });
 
-  it('respects the manifest numRecent, never a TS constant', () => {
-    const video = { ...edgetamVideo(), numRecent: 3, kvLen: 4 * 256 + 64 };
-    const s = strategyFor('edgetam', video);
-    expect(s.tposIndex({ isCond: true })).toBe(3);
-    expect(s.tposIndex({ isCond: false, recentOffset: 3 })).toBe(2);
-    expect(() => s.tposIndex({ isCond: false, recentOffset: 4 })).toThrow(InvalidStateError);
+  it('honours a different numRecent from the manifest (upper bound + cond slot move)', () => {
+    const s10 = strategyFor('edgetam', video({ numRecent: 10 }));
+    expect(s10.tposIndex({ isCond: true })).toBe(10);
+    expect(s10.tposIndex({ isCond: false, recentOffset: 10 })).toBe(9);
+    expect(() => s10.tposIndex({ isCond: false, recentOffset: 11 })).toThrow(InvalidStateError);
   });
 });
 
-describe('selectCondFrames (HF _select_closest_cond_frames replication, ⚠ PIN-6)', () => {
-  const strategy = strategyFor('edgetam', edgetamVideo());
+describe('EdgeTAM selectCondFrames', () => {
+  const s = edgetam();
 
-  it('keeps everything (sorted ascending) when the set fits', () => {
-    expect(strategy.selectCondFrames([], 5, 1)).toEqual([]);
-    expect(strategy.selectCondFrames([9], 5, 1)).toEqual([9]);
-    expect(strategy.selectCondFrames([10, 2], 5, 4)).toEqual([2, 10]);
+  it('returns every frame when at or under the cap (the single-prompt M2 path)', () => {
+    expect(s.selectCondFrames([0], 5, 1)).toEqual([0]);
+    expect(s.selectCondFrames([2, 7], 5, 2)).toEqual([2, 7]);
+    expect(s.selectCondFrames([], 5, 1)).toEqual([]);
+    // max <= 0 disables capping (EdgeTAM's max_cond_frame_num = -1).
+    expect(s.selectCondFrames([1, 2, 3], 2, 0)).toEqual([1, 2, 3]);
   });
 
-  it('max=1 (EdgeTAM): the single frame closest to currentFrame', () => {
-    expect(strategy.selectCondFrames([0, 4, 9], 5, 1)).toEqual([4]);
-    expect(strategy.selectCondFrames([0, 4, 9], 8, 1)).toEqual([9]);
-    // The frame equal to currentFrame is distance 0 and always wins.
-    expect(strategy.selectCondFrames([0, 5, 9], 5, 1)).toEqual([5]);
+  it('max=1 keeps the single closest to the current frame', () => {
+    expect(s.selectCondFrames([0, 4, 9], 8, 1)).toEqual([9]);
+    expect(s.selectCondFrames([0, 4, 9], 3, 1)).toEqual([4]);
   });
 
-  it('max=1 ties break toward the LOWER frameIdx', () => {
-    expect(strategy.selectCondFrames([3, 7], 5, 1)).toEqual([3]);
-    expect(strategy.selectCondFrames([7, 3], 5, 1)).toEqual([3]); // input order irrelevant
+  it('max=1 breaks ties toward the LOWER frameIdx', () => {
+    // frames 2 and 8 are equidistant from 5 → keep 2.
+    expect(s.selectCondFrames([2, 8], 5, 1)).toEqual([2]);
   });
 
-  it('max>=2: closest-before + closest-at/after are always kept (HF rule)', () => {
-    expect(strategy.selectCondFrames([0, 5, 10], 6, 2)).toEqual([5, 10]);
-    // currentFrame before all candidates: no "before", closest-after + fill.
-    expect(strategy.selectCondFrames([5, 10, 20], 2, 2)).toEqual([5, 10]);
-    // currentFrame after all candidates: no "after", closest-before + fill.
-    expect(strategy.selectCondFrames([1, 5, 10], 20, 2)).toEqual([5, 10]);
+  it('max>=2 keeps a before-anchor and an after-anchor, filling by distance', () => {
+    // current=5: before-anchor 4, after-anchor 6; fill (max 3) picks 3 over 9.
+    expect(s.selectCondFrames([0, 3, 4, 6, 9], 5, 3)).toEqual([3, 4, 6]);
   });
 
-  it('max>=2: remaining capacity fills by ascending temporal distance', () => {
-    // before=5, after=10 kept; remaining {0 (dist 6), 20 (dist 14)} → 0.
-    expect(strategy.selectCondFrames([0, 5, 10, 20], 6, 3)).toEqual([0, 5, 10]);
-  });
-
-  it('rejects a non-positive max', () => {
-    expect(() => strategy.selectCondFrames([1, 2], 3, 0)).toThrow(InvalidStateError);
+  it('preserves insertion order among the winners', () => {
+    const winners = s.selectCondFrames([9, 1, 5, 3], 4, 2);
+    // anchors: before=3, after=5 → returned in input order [5, 3] filtered → [5,3]?
+    // input order is [9,1,5,3] so filtered winners keep that order.
+    expect(winners).toEqual([5, 3]);
   });
 });
 
-describe('pointerTimeDeltas (streaming rule, ⚠ PIN-9)', () => {
-  const strategy = strategyFor('edgetam', edgetamVideo());
-
-  it('emits currentFrame - ptrFrame, most-recent-first, zero-padded to maxObjectPointers', () => {
-    const deltas = strategy.pointerTimeDeltas([3, 5, 4], 7);
+describe('EdgeTAM pointerTimeDeltas', () => {
+  it('is inert (all-zero) and padded to maxObjectPointers (pointer temporal PE disabled)', () => {
+    const s = edgetam();
+    const deltas = s.pointerTimeDeltas([9, 7, 3], 10);
     expect(deltas).toBeInstanceOf(BigInt64Array);
     expect(deltas.length).toBe(16);
-    expect([...deltas.slice(0, 3)]).toEqual([2n, 3n, 4n]); // frames 5, 4, 3
-    expect([...deltas.slice(3)]).toEqual(new Array(13).fill(0n));
+    expect([...deltas].every((d) => d === 0n)).toBe(true);
   });
 
-  it('returns all zeros for an empty pointer bank', () => {
-    expect([...strategy.pointerTimeDeltas([], 9)]).toEqual(new Array(16).fill(0n));
-  });
-
-  it('truncates to the most recent maxObjectPointers frames', () => {
-    const frames = Array.from({ length: 20 }, (_, i) => i); // 0..19
-    const deltas = strategy.pointerTimeDeltas(frames, 20);
-    expect(deltas.length).toBe(16);
-    // Most recent 16 frames are 19..4 → deltas 1..16.
-    expect([...deltas]).toEqual(Array.from({ length: 16 }, (_, i) => BigInt(i + 1)));
+  it('tracks a non-default maxObjectPointers', () => {
+    const s = strategyFor('edgetam', video({ maxObjectPointers: 8, ptrTokens: 32 }));
+    expect(s.pointerTimeDeltas([], 0).length).toBe(8);
   });
 });

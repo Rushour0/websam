@@ -16,18 +16,24 @@ import type { TransformMode } from '../coords.js';
 /** Weight quantization variants a manifest may carry. */
 export type Quant = 'fp32' | 'fp16' | 'int8' | 'q4f16';
 
-/** Graph roles websam knows about: the M1 image path + the M2 video path. */
+/**
+ * Graph roles websam knows about.
+ *
+ * - `'visionEncoder' | 'promptDecoder'` — the M1 image path.
+ * - `'videoEncoder' | 'memoryAttention' | 'maskDecoderVideo' | 'memoryEncoder'`
+ *   — the M2 EdgeTAM video (memory-bank tracking) path.
+ */
 export type KnownGraphRole =
   | 'visionEncoder'
-  | 'promptDecoder' // M1 image path
+  | 'promptDecoder'
   | 'videoEncoder'
   | 'memoryAttention'
   | 'maskDecoderVideo'
-  | 'memoryEncoder'; // M2 video path
+  | 'memoryEncoder';
 
 /**
- * Graph roles. Open union: future roles (e.g. an M3 `'noMemCondition'`
- * micro-graph) arrive without a schema bump.
+ * Graph roles. Open union: future roles arrive without a schema bump; the
+ * four video roles above are the concrete M2 additions.
  */
 export type GraphRole = KnownGraphRole | (string & {});
 
@@ -62,41 +68,44 @@ export interface GraphManifestEntry {
 }
 
 /**
- * Memory-loop constants pinned by tools/export (mirrors
- * `websam_export.spec.ExportSpec`). Every value here is emitted by the export
- * pipeline and consumed by the worker's video engine / memory bank — never
- * hardcoded in TS (docs/m2-internal-contracts.md §2.1).
+ * Memory-loop constants for the video (EdgeTAM) path — pinned by
+ * `tools/export` (mirrors `websam_export.spec.ExportSpec`) and consumed by the
+ * worker memory bank / arch strategy. Every value is a MANIFEST VALUE, never a
+ * TS constant. EdgeTAM values below are pinned by the M2 export spike
+ * (`tools/export/spikes/m2-edgetam/FINDINGS.md`): the 2D Spatial Perceiver
+ * compresses each memory frame to 512 latent tokens (256 1D + 256 2D), keeping
+ * 1 conditioning + 6 recent maps, so `kvLen = 7 * 512 + 64 = 3648`.
  */
 export interface VideoManifestSection {
-  /** Maximum prompted (conditioning) frames retained. EdgeTAM: 1. */
+  /** Conditioning frames whose maps are always retained. EdgeTAM: 1. */
   maxCondFrames: number;
-  /** Sliding window of most-recent non-conditioning frame memories. 6. */
+  /** Sliding window of most-recent tracked-frame maps. EdgeTAM: 6. */
   numRecent: number;
-  /** KV tokens per memory map — 256 perceiver latents for EdgeTAM. ⚠ PIN-1 */
+  /** KV tokens contributed per memory map (perceiver latents). EdgeTAM: 512. */
   tokensPerMemoryMap: number;
-  /** KV tokens contributed by the projected object-pointer bank. 64. */
+  /** KV tokens contributed by the projected object-pointer bank. EdgeTAM: 64. */
   ptrTokens: number;
-  /** Maximum object-pointer vectors kept before projection. 16. */
+  /** Object-pointer vectors kept before projection to `ptrTokens` tokens. EdgeTAM: 16. */
   maxObjectPointers: number;
   /**
-   * Frozen memory-attention KV length; parse-validated to equal
-   * `(maxCondFrames + numRecent) * tokensPerMemoryMap + ptrTokens`.
-   * EdgeTAM: 1856.
+   * Frozen memory-attention KV length the ONNX graph is exported with.
+   * Parse-validated: `== (maxCondFrames + numRecent) * tokensPerMemoryMap + ptrTokens`.
+   * EdgeTAM: 3648.
    */
   kvLen: number;
-  /** Memory-token channel width. 64. */
+  /** Memory-feature channel width (per token). EdgeTAM: 64. */
   memDim: number;
-  /** Object-pointer vector width. 256. */
+  /** Object-pointer vector width. EdgeTAM: 256. */
   embedDim: number;
-  /** Vision-feature grid edge (imageSize / patch stride). EdgeTAM: 64. */
+  /** Spatial memory grid edge (`imageSize / patch stride`). EdgeTAM: 64. */
   gridSize: number;
-  /** Memory graphs exported with a symbolic leading batch dim (objects = batch). ⚠ PIN-4 */
+  /** Memory graphs exported with a symbolic leading batch dim (objects = batch). */
   multiObjectBatch: boolean;
-  /** How the init (no-memory) frame is conditioned. ⚠ PIN-2 */
+  /** How the init (no-memory) frame is conditioned. */
   initPath: 'noMemFlag' | 'noMemGraph';
-  /** How temporal-position embeddings reach the graph. ⚠ PIN-3 */
+  /** How temporal-position embeddings reach the graph. */
   tposDelivery: 'indices' | 'precombined';
-  /** object_score_logits threshold below which the object counts as occluded. ⚠ PIN-8 */
+  /** `object_score_logits` threshold below which the object counts as occluded. */
   occlusionThreshold: number;
 }
 
@@ -119,7 +128,7 @@ export interface ModelManifest {
     /** Decoder low-res logit grid side (mask_size), e.g. 288. */
     maskSize: number;
   };
-  /** Present iff the tier ships video graphs. */
+  /** Present iff the tier ships video graphs (the four video roles). */
   video?: VideoManifestSection;
 }
 
@@ -127,6 +136,15 @@ const QUANTS: readonly Quant[] = ['fp32', 'fp16', 'int8', 'q4f16'];
 const DTYPES: readonly DType[] = ['float32', 'float16', 'int64', 'uint8', 'int32', 'bool'];
 const TRANSFORM_MODES: readonly TransformMode[] = ['square-stretch', 'letterbox'];
 const SHA256_HEX = /^[0-9a-f]{64}$/;
+const INIT_PATHS: readonly VideoManifestSection['initPath'][] = ['noMemFlag', 'noMemGraph'];
+const TPOS_DELIVERIES: readonly VideoManifestSection['tposDelivery'][] = ['indices', 'precombined'];
+/** Roles a `video` manifest section requires to be present in `graphs`. */
+const VIDEO_ROLES: readonly KnownGraphRole[] = [
+  'videoEncoder',
+  'memoryAttention',
+  'maskDecoderVideo',
+  'memoryEncoder',
+];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -207,82 +225,6 @@ function parseGraphEntry(value: unknown, where: string): GraphManifestEntry {
   };
 }
 
-const VIDEO_INIT_PATHS: readonly VideoManifestSection['initPath'][] = ['noMemFlag', 'noMemGraph'];
-const VIDEO_TPOS_DELIVERIES: readonly VideoManifestSection['tposDelivery'][] = [
-  'indices',
-  'precombined',
-];
-/** Graph roles that must all be present when the `video` section is set. */
-const VIDEO_GRAPH_ROLES: readonly KnownGraphRole[] = [
-  'videoEncoder',
-  'memoryAttention',
-  'maskDecoderVideo',
-  'memoryEncoder',
-];
-
-/** Positive-integer count fields of {@link VideoManifestSection}. */
-const VIDEO_COUNT_FIELDS = [
-  'maxCondFrames',
-  'numRecent',
-  'tokensPerMemoryMap',
-  'ptrTokens',
-  'maxObjectPointers',
-  'kvLen',
-  'memDim',
-  'embedDim',
-  'gridSize',
-] as const;
-
-function parseVideoSection(value: unknown, where: string): VideoManifestSection {
-  if (!isRecord(value)) fail(where, 'must be an object');
-  const counts = {} as Record<(typeof VIDEO_COUNT_FIELDS)[number], number>;
-  for (const key of VIDEO_COUNT_FIELDS) {
-    const v = value[key];
-    if (!isPositiveInteger(v)) fail(`${where}.${key}`, 'must be a positive integer');
-    counts[key] = v;
-  }
-  // The kvLen identity: the frozen KV length the graphs were exported with
-  // must equal maps × tokens + pointer tokens (mirrors ExportSpec.__post_init__).
-  const expectedKvLen =
-    (counts.maxCondFrames + counts.numRecent) * counts.tokensPerMemoryMap + counts.ptrTokens;
-  if (counts.kvLen !== expectedKvLen) {
-    fail(
-      `${where}.kvLen`,
-      `must equal (maxCondFrames + numRecent) * tokensPerMemoryMap + ptrTokens = ${expectedKvLen}, got ${counts.kvLen}`,
-    );
-  }
-  const multiObjectBatch = value['multiObjectBatch'];
-  if (typeof multiObjectBatch !== 'boolean') {
-    fail(`${where}.multiObjectBatch`, 'must be a boolean');
-  }
-  const initPath = value['initPath'];
-  if (
-    typeof initPath !== 'string' ||
-    !(VIDEO_INIT_PATHS as readonly string[]).includes(initPath)
-  ) {
-    fail(`${where}.initPath`, `must be one of ${VIDEO_INIT_PATHS.join(', ')}`);
-  }
-  const tposDelivery = value['tposDelivery'];
-  if (
-    typeof tposDelivery !== 'string' ||
-    !(VIDEO_TPOS_DELIVERIES as readonly string[]).includes(tposDelivery)
-  ) {
-    fail(`${where}.tposDelivery`, `must be one of ${VIDEO_TPOS_DELIVERIES.join(', ')}`);
-  }
-  const occlusionThreshold = value['occlusionThreshold'];
-  // A logit threshold: any finite number (typically 0 or negative) is valid.
-  if (typeof occlusionThreshold !== 'number' || !Number.isFinite(occlusionThreshold)) {
-    fail(`${where}.occlusionThreshold`, 'must be a finite number');
-  }
-  return {
-    ...counts,
-    multiObjectBatch,
-    initPath: initPath as VideoManifestSection['initPath'],
-    tposDelivery: tposDelivery as VideoManifestSection['tposDelivery'],
-    occlusionThreshold,
-  };
-}
-
 function parseTriple(value: unknown, where: string): [number, number, number] {
   if (
     !Array.isArray(value) ||
@@ -292,6 +234,78 @@ function parseTriple(value: unknown, where: string): [number, number, number] {
     fail(where, 'must be an array of exactly 3 finite numbers');
   }
   return [value[0] as number, value[1] as number, value[2] as number];
+}
+
+function parseVideoSection(
+  value: unknown,
+  graphs: Partial<Record<GraphRole, GraphManifestEntry>>,
+  where: string,
+): VideoManifestSection {
+  if (!isRecord(value)) fail(where, 'must be an object');
+  const int = (key: string): number => {
+    if (!isPositiveInteger(value[key])) fail(`${where}.${key}`, 'must be a positive integer');
+    return value[key] as number;
+  };
+  const maxCondFrames = int('maxCondFrames');
+  const numRecent = int('numRecent');
+  const tokensPerMemoryMap = int('tokensPerMemoryMap');
+  const ptrTokens = int('ptrTokens');
+  const maxObjectPointers = int('maxObjectPointers');
+  const kvLen = int('kvLen');
+  const memDim = int('memDim');
+  const embedDim = int('embedDim');
+  const gridSize = int('gridSize');
+
+  const expectedKvLen = (maxCondFrames + numRecent) * tokensPerMemoryMap + ptrTokens;
+  if (kvLen !== expectedKvLen) {
+    fail(
+      `${where}.kvLen`,
+      `must equal (maxCondFrames + numRecent) * tokensPerMemoryMap + ptrTokens = ${expectedKvLen}, got ${kvLen}`,
+    );
+  }
+
+  const multiObjectBatch = value['multiObjectBatch'];
+  if (typeof multiObjectBatch !== 'boolean') fail(`${where}.multiObjectBatch`, 'must be a boolean');
+
+  const initPath = value['initPath'];
+  if (typeof initPath !== 'string' || !(INIT_PATHS as readonly string[]).includes(initPath)) {
+    fail(`${where}.initPath`, `must be one of ${INIT_PATHS.join(', ')}`);
+  }
+
+  const tposDelivery = value['tposDelivery'];
+  if (
+    typeof tposDelivery !== 'string' ||
+    !(TPOS_DELIVERIES as readonly string[]).includes(tposDelivery)
+  ) {
+    fail(`${where}.tposDelivery`, `must be one of ${TPOS_DELIVERIES.join(', ')}`);
+  }
+
+  const occlusionThreshold = value['occlusionThreshold'];
+  if (typeof occlusionThreshold !== 'number' || !Number.isFinite(occlusionThreshold)) {
+    fail(`${where}.occlusionThreshold`, 'must be a finite number');
+  }
+
+  for (const role of VIDEO_ROLES) {
+    if (!graphs[role]) {
+      fail(where, `requires graph role '${role}' to be present in graphs`);
+    }
+  }
+
+  return {
+    maxCondFrames,
+    numRecent,
+    tokensPerMemoryMap,
+    ptrTokens,
+    maxObjectPointers,
+    kvLen,
+    memDim,
+    embedDim,
+    gridSize,
+    multiObjectBatch,
+    initPath: initPath as VideoManifestSection['initPath'],
+    tposDelivery: tposDelivery as VideoManifestSection['tposDelivery'],
+    occlusionThreshold,
+  };
 }
 
 function parseManifestFields(json: unknown): ModelManifest {
@@ -323,18 +337,6 @@ function parseManifestFields(json: unknown): ModelManifest {
     }
   }
 
-  let video: VideoManifestSection | undefined;
-  const videoJson = json['video'];
-  if (videoJson !== undefined) {
-    video = parseVideoSection(videoJson, 'video');
-    // A tier that declares video constants must ship all four video graphs.
-    for (const role of VIDEO_GRAPH_ROLES) {
-      if (graphs[role] === undefined) {
-        fail('graphs', `role '${role}' is required when the video section is present`);
-      }
-    }
-  }
-
   const pre = json['preprocess'];
   if (!isRecord(pre)) fail('preprocess', 'must be an object');
   const mode = pre['mode'];
@@ -344,7 +346,7 @@ function parseManifestFields(json: unknown): ModelManifest {
   if (!isPositiveInteger(pre['inputSize'])) fail('preprocess.inputSize', 'must be a positive integer');
   if (!isPositiveInteger(pre['maskSize'])) fail('preprocess.maskSize', 'must be a positive integer');
 
-  return {
+  const manifest: ModelManifest = {
     schemaVersion: 1,
     tier: json['tier'],
     opset: json['opset'],
@@ -357,8 +359,13 @@ function parseManifestFields(json: unknown): ModelManifest {
       std: parseTriple(pre['std'], 'preprocess.std'),
       maskSize: pre['maskSize'],
     },
-    ...(video !== undefined ? { video } : {}),
   };
+
+  if (json['video'] !== undefined) {
+    manifest.video = parseVideoSection(json['video'], graphs, 'video');
+  }
+
+  return manifest;
 }
 
 /**

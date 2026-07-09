@@ -14,6 +14,8 @@ export default defineConfig({
       {
         test: {
           name: 'browser',
+          // The real PNG-codec export path (OffscreenCanvas.convertToBlob) only
+          // exists in a browser/worker lane; these tests self-skip elsewhere.
           include: ['src/**/*.browser.test.ts'],
           browser: {
             enabled: true,

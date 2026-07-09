@@ -1,10 +1,10 @@
 import { InvalidStateError, NotImplementedError, UnsupportedDeviceError } from '../errors.js';
-import { createOrtSession, type OrtBackendSession } from '../runtime/ort-session.js';
+import { createOrtSession, OrtBackendSession } from '../runtime/ort-session.js';
 import {
   allocCpuTensor,
   createCpuTensor,
+  OrtDeviceTensor,
   readbackTensor,
-  type OrtDeviceTensor,
 } from '../runtime/ort-tensor.js';
 import type {
   Backend,
@@ -15,12 +15,68 @@ import type {
   IOBindingPlan,
   TensorLocation,
 } from './backend.js';
-import {
-  censusStats,
-  CensusOrtBackendSession,
-  checkCopyRegionArgs,
-  type OrtModule,
-} from './webgpu-backend.js';
+import type { OrtModule } from './webgpu-backend.js';
+
+/** Bytes per element for each {@link DType} (used by the census + slot math). */
+const DTYPE_BYTES = {
+  float32: 4,
+  float16: 2,
+  int64: 8,
+  uint8: 1,
+  int32: 4,
+  bool: 1,
+} as const satisfies Record<DType, number>;
+
+/** Total byte size of a tensor of `shape` and `dtype`. */
+function tensorByteLength(shape: readonly number[], dtype: DType): number {
+  let elements = 1;
+  for (const dim of shape) elements *= dim;
+  return elements * DTYPE_BYTES[dtype];
+}
+
+/** Element count of one slot (`prod(shape.slice(1))`) of a ring tensor. */
+function slotElementCount(shape: readonly number[]): number {
+  let elements = 1;
+  for (let i = 1; i < shape.length; i += 1) elements *= shape[i] ?? 0;
+  return elements;
+}
+
+/**
+ * Shared {@link Backend.copyRegion} precondition check (the §1.1 byte-count
+ * rule): `dst` has a leading slot axis, `slotIndex` is in range, dtypes
+ * match, and `src` holds exactly one slot's worth of elements. Throws
+ * {@link InvalidStateError} on any violation.
+ */
+function validateCopyRegion(src: DeviceTensor, dst: DeviceTensor, slotIndex: number): void {
+  if (dst.shape.length === 0) {
+    throw new InvalidStateError('copyRegion: dst must have a leading slot axis');
+  }
+  const slots = dst.shape[0] ?? 0;
+  if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex >= slots) {
+    throw new InvalidStateError(`copyRegion: slotIndex ${slotIndex} out of bounds [0, ${slots})`);
+  }
+  if (src.dtype !== dst.dtype) {
+    throw new InvalidStateError(
+      `copyRegion: dtype mismatch (src '${src.dtype}', dst '${dst.dtype}')`,
+    );
+  }
+  const slotElems = slotElementCount(dst.shape);
+  let srcElems = 1;
+  for (const dim of src.shape) srcElems *= dim;
+  if (srcElems !== slotElems) {
+    throw new InvalidStateError(
+      `copyRegion: src has ${srcElems} elements but one dst slot holds ${slotElems}`,
+    );
+  }
+}
+
+/** The backing typed array of a cpu-located {@link OrtDeviceTensor}. */
+function typedDataOf(tensor: DeviceTensor): { set(source: unknown, offset: number): void } {
+  if (!(tensor instanceof OrtDeviceTensor)) {
+    throw new InvalidStateError('copyRegion: tensor was not created by this backend');
+  }
+  return tensor.ortTensor.data as unknown as { set(source: unknown, offset: number): void };
+}
 
 /** Result of {@link WasmBackend.probe}: pure capability facts, no ort involved. */
 export interface WasmProbeResult {
@@ -44,11 +100,11 @@ export interface WasmProbeResult {
  * onnxruntime-web's wasm execution provider. This is the universal fallback:
  * it must work on every supported browser, isolated or not.
  *
- * M2 status: everything on the Backend interface is real except streaming
- * (`url`) graph compilation. On this backend everything is cpu-located, so
- * {@link copyRegion} is a typed-array region copy and `'device'` allocation
- * degrades to `'cpu'` by design; {@link debugStats} provides the leak-gate
- * tensor census.
+ * M2 status: probing, session creation, tensor upload/alloc,
+ * {@link copyRegion}, readback, {@link debugStats} and dispose are all real.
+ * On this backend everything is cpu-located, so device-located
+ * {@link allocTensor} degrades to a cpu tensor and {@link copyRegion} is a
+ * plain typed-array region copy.
  */
 export class WasmBackend implements Backend {
   readonly kind = 'wasm' as const;
@@ -116,9 +172,7 @@ export class WasmBackend implements Backend {
       );
     }
     const inner = await createOrtSession(this.#ort, 'wasm', graph.bytes, { ioPlan: plan });
-    const session = new CensusOrtBackendSession(inner, this.#tensors, (s) =>
-      this.#sessions.delete(s),
-    );
+    const session = new OrtBackendSession(inner, (s) => this.#sessions.delete(s));
     this.#sessions.add(session);
     return session;
   }
@@ -132,48 +186,43 @@ export class WasmBackend implements Backend {
   }
 
   /**
-   * Allocate a zeroed tensor. On wasm everything is host memory, so
-   * `'device'` degrades to `'cpu'` by design (documented: on this backend
-   * `'device'` === `'cpu'`) — the video memory bank's rings are plain
-   * typed-array tensors here and the returned tensor reports
-   * `location: 'cpu'`.
+   * Allocate a zeroed tensor. On wasm there is no accelerator, so `'device'`
+   * degrades to a `'cpu'`-located tensor (documented: on this backend
+   * `'device'` === `'cpu'`) — identical to the `'cpu'` path. This lets the
+   * video memory-bank ring allocate uniformly through the backend without
+   * caring which environment it runs in.
    */
-  allocTensor(shape: readonly number[], dtype: DType, location: TensorLocation): DeviceTensor {
+  allocTensor(shape: readonly number[], dtype: DType, _location: TensorLocation): DeviceTensor {
     this.#assertInitialized('allocTensor');
-    void location; // 'device' === 'cpu' on wasm — every allocation is host memory.
     const tensor = allocCpuTensor(this.#ort, shape, dtype, (t) => this.#tensors.delete(t));
     this.#tensors.add(tensor);
     return tensor;
   }
 
   /**
-   * The memory-bank ring primitive, real in M2: a single
-   * `TypedArray.prototype.set` of `src`'s elements into slot `slotIndex`
-   * of `dst`. dtype, slot bounds, and the byte-count-equal rule are
-   * validated per the Backend contract (`InvalidStateError` otherwise).
+   * Copy `src` into slot `slotIndex` of the ring `dst`. Everything is cpu on
+   * this backend, so this is a `TypedArray.prototype.set` of one slot's
+   * worth of elements at the slot's element offset. The §1.1 byte-count rule
+   * is validated first ({@link InvalidStateError} on violation).
    */
   copyRegion(src: DeviceTensor, dst: DeviceTensor, slotIndex: number): void {
     this.#assertInitialized('copyRegion');
-    const geometry = checkCopyRegionArgs('WasmBackend.copyRegion', src, dst, slotIndex);
-    if (geometry.src.location !== 'cpu' || geometry.dst.location !== 'cpu') {
-      throw new InvalidStateError(
-        'WasmBackend.copyRegion: operands must be cpu-located (everything is cpu on wasm)',
-      );
-    }
-    // Same dtype ⇒ same typed-array kind; the casts only narrow for TS —
-    // set() dispatches on the operands' real typed-array types at runtime.
-    const srcData = geometry.src.ortTensor.data as Uint8Array;
-    const dstData = geometry.dst.ortTensor.data as Uint8Array;
-    dstData.set(srcData, geometry.elementOffset);
+    validateCopyRegion(src, dst, slotIndex);
+    const slotElems = slotElementCount(dst.shape);
+    typedDataOf(dst).set(typedDataOf(src) as unknown, slotIndex * slotElems);
   }
 
   /**
-   * Live-resource census for leak gates (M2): every non-disposed tensor
-   * this backend created — alloc, upload, and `run()` outputs. Callable in
-   * any state; after {@link dispose} it reports zeros.
+   * Live-resource census (§1.1): every tensor this backend uploaded or
+   * allocated and has not yet disposed, plus their aggregate byte size. The
+   * video loop's steady-state flatness gate reads this each frame boundary.
    */
   debugStats(): { liveTensors: number; liveBytes: number } {
-    return censusStats(this.#tensors);
+    let liveBytes = 0;
+    for (const tensor of this.#tensors) {
+      liveBytes += tensorByteLength(tensor.shape, tensor.dtype);
+    }
+    return { liveTensors: this.#tensors.size, liveBytes };
   }
 
   /**
@@ -194,11 +243,7 @@ export class WasmBackend implements Backend {
     this.#assertInitialized('dispose');
     this.#initialized = false;
     for (const tensor of [...this.#tensors]) {
-      // run() outputs stay in the census after the caller disposes them
-      // (pruned lazily, see censusStats) — never double-dispose those.
-      if (!tensor.disposed) {
-        tensor.dispose();
-      }
+      tensor.dispose();
     }
     this.#tensors.clear();
     for (const session of [...this.#sessions]) {

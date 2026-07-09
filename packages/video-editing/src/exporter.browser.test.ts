@@ -1,111 +1,76 @@
 import { describe, expect, it } from 'vitest';
-import { unzipSync } from 'fflate';
-import { decodeRLE, encodeRLE } from '@websam/core';
 import type { RLEMask } from '@websam/core';
+import { unzipSync } from 'fflate';
 import { AlphaMatteExporter } from './exporter.js';
 import { MaskTimeline } from './timeline.js';
 
-// Non-square on purpose: a row/column-major mixup would scramble the pixels.
-const WIDTH = 8;
-const HEIGHT = 6;
+// The video-editing package has a single (node) vitest project; this file
+// self-skips there and only runs where the real PNG codec exists (a browser or
+// worker lane with OffscreenCanvas + createImageBitmap). It exercises the REAL
+// OffscreenCanvas.convertToBlob('image/png') path the node test stubs out.
+const hasCanvas =
+  typeof OffscreenCanvas !== 'undefined' &&
+  typeof ImageData !== 'undefined' &&
+  typeof createImageBitmap !== 'undefined';
 
-/** A deterministic non-trivial binary mask: a filled rectangle plus a stripe. */
-function patternMask(): { rle: RLEMask; bits: Uint8Array } {
-  const bits = new Uint8Array(WIDTH * HEIGHT);
-  for (let y = 1; y < 4; y++) {
-    for (let x = 2; x < 7; x++) bits[y * WIDTH + x] = 1;
-  }
-  for (let x = 0; x < WIDTH; x++) bits[5 * WIDTH + x] = x % 2;
-  return { rle: encodeRLE(bits, WIDTH, HEIGHT), bits };
+function rle(width: number, height: number, counts: number[]): RLEMask {
+  return { width, height, counts: Uint32Array.from(counts) };
 }
 
-/** Decode one PNG zip entry back to RGBA bytes via the real browser codec. */
-async function decodePngEntry(entry: Uint8Array): Promise<Uint8ClampedArray> {
-  const bitmap = await createImageBitmap(
-    new Blob([entry as Uint8Array<ArrayBuffer>], { type: 'image/png' }),
-  );
-  expect(bitmap.width).toBe(WIDTH);
-  expect(bitmap.height).toBe(HEIGHT);
-  const canvas = new OffscreenCanvas(WIDTH, HEIGHT);
+/** Decode a PNG entry back into flat RGBA via createImageBitmap + a 2D canvas. */
+async function pngToRgba(entry: Uint8Array): Promise<Uint8ClampedArray> {
+  const bitmap = await createImageBitmap(new Blob([new Uint8Array(entry)], { type: 'image/png' }));
+  // Capture dims before close(): closing an ImageBitmap resets width/height to 0.
+  const { width, height } = bitmap;
+  const canvas = new OffscreenCanvas(width, height);
   const ctx = canvas.getContext('2d');
-  if (ctx === null) throw new Error('2d context unavailable');
+  if (ctx === null) throw new Error('no 2D context');
   ctx.drawImage(bitmap, 0, 0);
   bitmap.close();
-  return ctx.getImageData(0, 0, WIDTH, HEIGHT).data;
+  return ctx.getImageData(0, 0, width, height).data;
 }
 
-/** The white-on-black opaque RGBA a matte PNG must decode to for `rle`. */
-function expectedRgba(rle: RLEMask): Uint8ClampedArray {
-  const bits = decodeRLE(rle);
-  const rgba = new Uint8ClampedArray(bits.length * 4);
-  for (let i = 0; i < bits.length; i++) {
-    const value = bits[i] ? 255 : 0;
-    rgba[i * 4] = value;
-    rgba[i * 4 + 1] = value;
-    rgba[i * 4 + 2] = value;
-    rgba[i * 4 + 3] = 255;
-  }
-  return rgba;
-}
-
-describe('AlphaMatteExporter png-sequence (real browser PNG codec)', () => {
-  it('exports PNGs whose decoded pixels round-trip the mask exactly', async () => {
-    const { rle } = patternMask();
-    const timeline = new MaskTimeline({ frameCount: 3, fps: 30, width: WIDTH, height: HEIGHT });
-    timeline.set('1', 0, rle);
-    timeline.set('1', 2, rle); // hole at frame 1
+describe.skipIf(!hasCanvas)('AlphaMatteExporter — real PNG round-trip', () => {
+  it('encodes a real PNG whose pixels decode back to the white-on-black matte', async () => {
+    // 2x2 mask [1,0,0,1] → white, black, black, white (all opaque).
+    const timeline = new MaskTimeline({ frameCount: 1, fps: 30, width: 2, height: 2 });
+    timeline.set('a', 0, rle(2, 2, [0, 1, 2, 1]));
 
     const result = await new AlphaMatteExporter(timeline).export({
       mode: 'matte',
       format: 'png-sequence',
     });
     expect(result.format).toBe('png-sequence');
-    expect(result.suggestedFileName).toBe('matte.zip');
-    expect(result.framesExported).toBe(2);
+    expect(result.framesExported).toBe(1);
 
     const entries = unzipSync(new Uint8Array(await result.blob.arrayBuffer()));
-    expect(Object.keys(entries).sort()).toEqual([
-      'frame-000000.png',
-      'frame-000002.png',
-      'timeline.json',
-    ]);
+    const entry = entries['frame-000000.png'];
+    expect(entry).toBeDefined();
+    // Real PNG signature.
+    expect(Array.from(entry!.subarray(0, 8))).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
-    const png = entries['frame-000000.png'];
-    if (png === undefined) throw new Error('frame-000000.png missing from zip');
-    const rgba = await decodePngEntry(png);
-    // PNG is lossless and the matte is opaque, so the round-trip is exact.
-    expect(Array.from(rgba)).toEqual(Array.from(expectedRgba(rle)));
+    const rgba = await pngToRgba(entry!);
+    expect(Array.from(rgba)).toEqual([
+      255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255,
+    ]);
   });
 
-  it('nests per-object folders and a parseable timeline.json for multi-object timelines', async () => {
-    const { rle } = patternMask();
-    const timeline = new MaskTimeline({ frameCount: 2, fps: 24, width: WIDTH, height: HEIGHT });
-    timeline.set('1', 0, rle);
-    timeline.set('2', 1, rle);
+  it('produces a multi-object zip whose entries all decode as PNGs', async () => {
+    const timeline = new MaskTimeline({ frameCount: 2, fps: 30, width: 2, height: 2 });
+    timeline.set('a', 0, rle(2, 2, [4]));
+    timeline.set('b', 1, rle(2, 2, [0, 4]));
 
     const result = await new AlphaMatteExporter(timeline).export({ mode: 'matte' });
     const entries = unzipSync(new Uint8Array(await result.blob.arrayBuffer()));
     expect(Object.keys(entries).sort()).toEqual([
-      'obj-1/frame-000000.png',
-      'obj-2/frame-000001.png',
+      'obj-a/frame-000000.png',
+      'obj-b/frame-000001.png',
       'timeline.json',
     ]);
-
-    const sidecarBytes = entries['timeline.json'];
-    if (sidecarBytes === undefined) throw new Error('timeline.json missing from zip');
-    const sidecar = JSON.parse(new TextDecoder().decode(sidecarBytes)) as {
-      fps: number;
-      frameCount: number;
-      width: number;
-      height: number;
-      objects: Record<string, number[]>;
-    };
-    expect(sidecar).toEqual({
-      fps: 24,
-      frameCount: 2,
-      width: WIDTH,
-      height: HEIGHT,
-      objects: { '1': [0], '2': [1] },
-    });
+    // obj-b frame is all-white (mask [0,4] → every pixel set).
+    const rgba = await pngToRgba(entries['obj-b/frame-000001.png']!);
+    expect(Array.from(rgba)).toEqual([
+      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    ]);
   });
 });

@@ -94,7 +94,7 @@ describe.each([
   });
 
   describe('before init()', () => {
-    it('every M1 method throws InvalidStateError; copyRegion stays NotImplementedError', async () => {
+    it('every method throws InvalidStateError before init() (incl. the M2 memory primitives)', async () => {
       await expect(backend.createSession({ name: 'g', bytes: graphBytes })).rejects.toBeInstanceOf(
         InvalidStateError,
       );
@@ -104,9 +104,12 @@ describe.each([
       expect(() => backend.allocTensor([1], 'float32', 'cpu')).toThrow(InvalidStateError);
       await expect(backend.readback({} as DeviceTensor)).rejects.toBeInstanceOf(InvalidStateError);
       await expect(backend.dispose()).rejects.toBeInstanceOf(InvalidStateError);
-      expect(() =>
-        backend.copyRegion({} as DeviceTensor, {} as DeviceTensor, 0),
-      ).toThrow(NotImplementedError);
+      // M2: copyRegion runs assertInitialized first, so before init it is an
+      // InvalidStateError, not NotImplementedError. Full M2 behavior is covered
+      // in backend/memory-primitives.test.ts.
+      expect(() => backend.copyRegion({} as DeviceTensor, {} as DeviceTensor, 0)).toThrow(
+        InvalidStateError,
+      );
     });
   });
 
@@ -138,17 +141,16 @@ describe.each([
       expect((tensor as OrtDeviceTensor).ortTensor.data).toBe(data);
     });
 
-    it("allocTensor('cpu') returns a zeroed tensor; 'device' stays NotImplementedError (M2)", () => {
+    it("allocTensor('cpu') returns a zeroed tensor", () => {
       const tensor = backend.allocTensor([2, 2], 'float32', 'cpu');
       expect(tensor.location).toBe('cpu');
       expect((tensor as OrtDeviceTensor).ortTensor.data).toEqual(new Float32Array(4));
-      expect(() => backend.allocTensor([2, 2], 'float32', 'device')).toThrow(NotImplementedError);
     });
 
-    it('copyRegion still throws NotImplementedError (M2 memory-bank primitive)', () => {
-      const t = backend.allocTensor([1], 'float32', 'cpu');
-      expect(() => backend.copyRegion(t, t, 0)).toThrow(NotImplementedError);
-    });
+    // Device allocation + copyRegion (the M2 memory-bank primitives) are
+    // exercised in backend/memory-primitives.test.ts against real bytes, since
+    // their behavior diverges per backend (wasm degrades to cpu; webgpu needs a
+    // live GPU device) and is not meaningfully testable through this fake harness.
 
     it('readback returns a view over cpu data and getData() for device tensors', async () => {
       const data = Float32Array.from([1, 2]);

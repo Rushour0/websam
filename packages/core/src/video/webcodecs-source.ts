@@ -1,222 +1,83 @@
 /**
- * WebCodecs-backed {@link FrameSource}: mp4box demux + `VideoDecoder`, all in
- * the worker (docs/m2-internal-contracts.md §0 frame-source row, §4, §9.2).
+ * {@link FrameSource} backed by mp4box (demux) + WebCodecs `VideoDecoder`.
  *
- * Split by testability:
- * - PURE sample-table math ({@link SampleTable}) — presentation⇄decode order
- *   mapping, GOP-aware sync-sample lookup, timestamp bookkeeping. Unit-tested
- *   in node.
- * - Container demux ({@link demuxMp4}) — mp4box parsing of the WHOLE blob
- *   (Blobs clone by reference across the worker boundary; the encoded
- *   samples then live in worker memory, ≈ file size — the M2 trade-off,
- *   revisited when streaming attach lands). Runs in node too (mp4box is
- *   environment-agnostic), so it is unit-tested against the committed
- *   fixture.
- * - Decode ({@link WebCodecsFrameSource}) — browser-only (`VideoDecoder`),
- *   covered by `webcodecs-source.browser.test.ts`.
+ * Runs in the worker. The whole MP4 is demuxed up front into an in-memory
+ * sample table (small: clips are held by reference as a `Blob` and the decoded
+ * bytes never cross a thread), from which two decode paths are served:
  *
- * Backpressure (§5.2 stall semantics): the read iterator is pull-driven —
- * encoded chunks are fed only while `decodeQueueSize` and the un-consumed
- * frame queue are below small watermarks, so a stalled consumer (propagation
- * port out of credits) stops the decoder instead of ballooning VideoFrames.
+ *  - {@link WebCodecsFrameSource.frameAt} — random access: seek to the sample's
+ *    enclosing keyframe, decode that GOP, return the requested frame.
+ *  - {@link WebCodecsFrameSource.read} — sequential forward: walk GOPs from the
+ *    one covering `startFrame`, yielding in presentation order with
+ *    GOP-granular backpressure (the async generator suspends between GOPs).
+ *
+ * GOP-awareness comes from the sync-sample table (`is_sync`): a target frame is
+ * only decodable after its enclosing keyframe, and closed-GOP display order is
+ * recovered by fully decoding each touched GOP and sorting its output by
+ * presentation index. Every GOP is decoded from a key frame, so a fresh
+ * `VideoDecoder` (frameAt) or a flush between GOPs (read) is always seeded
+ * correctly.
  */
 
-import { MP4BoxBuffer, MultiBufferStream, createFile } from 'mp4box';
-import type { Movie, Sample, VisualSampleEntry } from 'mp4box';
+import { createFile, DataStream, type ISOFile, MP4BoxBuffer } from 'mp4box';
 import { InvalidStateError } from '../errors.js';
-import type { DecodedFrame, FrameSource, VideoSourceInfo } from './frame-source.js';
+import type { DecodedFrame, FrameRange, FrameSource, VideoSourceInfo } from './frame-source.js';
 
-// ---------------------------------------------------------------------------
-// Pure sample-table math (unit-tested in node)
-// ---------------------------------------------------------------------------
-
-/** Timing of one encoded sample, in track-timescale units, DECODE order. */
-export interface SampleTiming {
-  /** Decode timestamp — must be non-decreasing across the array. */
-  dts: number;
-  /** Composition (presentation) timestamp. */
-  cts: number;
-  /** Sample duration; non-negative. */
-  duration: number;
-  /** True iff the sample is a sync sample (decodes without references). */
-  isSync: boolean;
-}
-
-/**
- * Presentation⇄decode bookkeeping for one video track.
- *
- * "Frame index" is PRESENTATION order (what `FrameSource` speaks); mp4box
- * hands samples in DECODE order (dts-ascending). The two differ only when
- * the stream reorders (B-frames) — the math is general either way.
- */
-export class SampleTable {
-  /** Number of presentation frames (== sample count). */
-  readonly frameCount: number;
-  /** Total track duration in microseconds (sum of sample durations). */
-  readonly durationUs: number;
-  /** `frameCount / durationSeconds` — VFR clips flatten to one rate. */
-  readonly fps: number;
-
-  /** presentation index → decode index. */
-  private readonly presToDecode: Int32Array;
-  /** decode index → is_sync bit. */
-  private readonly syncFlags: Uint8Array;
-  /** presentation index → presentation timestamp (µs, integer). */
-  private readonly presTimestampsUs: number[];
-  /** exact presentation timestamp (µs) → presentation index. */
-  private readonly tsToFrame: Map<number, number>;
-
-  constructor(samples: readonly SampleTiming[], timescale: number) {
-    if (!Number.isInteger(timescale) || timescale <= 0) {
-      throw new InvalidStateError(`SampleTable: invalid timescale ${timescale}`);
-    }
-    const n = samples.length;
-    if (n === 0) throw new InvalidStateError('SampleTable: empty sample list');
-
-    let totalDuration = 0;
-    for (let i = 0; i < n; i++) {
-      const s = samples[i] as SampleTiming;
-      if (s.duration < 0) {
-        throw new InvalidStateError(`SampleTable: negative duration at decode index ${i}`);
-      }
-      if (i > 0 && s.dts < (samples[i - 1] as SampleTiming).dts) {
-        throw new InvalidStateError(
-          `SampleTable: samples not in decode order (dts decreases at index ${i})`,
-        );
-      }
-      totalDuration += s.duration;
-    }
-    if (totalDuration <= 0) {
-      throw new InvalidStateError('SampleTable: track has zero total duration');
-    }
-
-    // Presentation order = stable sort of decode order by (cts, dts).
-    const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => {
-      const sa = samples[a] as SampleTiming;
-      const sb = samples[b] as SampleTiming;
-      return sa.cts - sb.cts || sa.dts - sb.dts;
-    });
-
-    this.frameCount = n;
-    this.durationUs = Math.round((totalDuration * 1e6) / timescale);
-    this.fps = (n * 1e6) / this.durationUs;
-    this.presToDecode = Int32Array.from(order);
-    this.syncFlags = Uint8Array.from(samples, (s) => (s.isSync ? 1 : 0));
-    this.presTimestampsUs = order.map((decodeIndex) =>
-      Math.round(((samples[decodeIndex] as SampleTiming).cts * 1e6) / timescale),
-    );
-    this.tsToFrame = new Map(this.presTimestampsUs.map((ts, frameIndex) => [ts, frameIndex]));
-  }
-
-  /** Presentation timestamp (µs) of a presentation frame index. */
-  timestampUs(frameIndex: number): number {
-    this.checkFrameIndex(frameIndex, 'timestampUs');
-    return this.presTimestampsUs[frameIndex] as number;
-  }
-
-  /** Decode-order position of a presentation frame index. */
-  decodeIndexOf(frameIndex: number): number {
-    this.checkFrameIndex(frameIndex, 'decodeIndexOf');
-    return this.presToDecode[frameIndex] as number;
-  }
-
-  /**
-   * GOP-aware seek origin: the greatest decode index `d` such that sample
-   * `d` is a sync sample and `d <= decodeIndexOf(frameIndex)` — decoding
-   * from `d` forward reconstructs the requested frame.
-   */
-  syncDecodeIndexFor(frameIndex: number): number {
-    for (let d = this.decodeIndexOf(frameIndex); d >= 0; d--) {
-      if (this.syncFlags[d] === 1) return d;
-    }
-    throw new InvalidStateError(
-      `SampleTable: no sync sample at or before frame ${frameIndex} — unseekable track`,
-    );
-  }
-
-  /**
-   * Upper feed bound for a sequential read of `[startFrame, endFrame)`: the
-   * greatest decode index any frame in the range needs (with reordering a
-   * later presentation frame can sit EARLIER in decode order).
-   */
-  lastDecodeIndexFor(startFrame: number, endFrame: number): number {
-    this.checkFrameIndex(startFrame, 'lastDecodeIndexFor');
-    this.checkFrameIndex(endFrame - 1, 'lastDecodeIndexFor');
-    let max = 0;
-    for (let i = startFrame; i < endFrame; i++) {
-      const d = this.presToDecode[i] as number;
-      if (d > max) max = d;
-    }
-    return max;
-  }
-
-  /**
-   * Map a decoder-output timestamp back to its presentation frame index.
-   * Exact match preferred (chunk timestamps round-trip through the decoder
-   * verbatim); otherwise the nearest presentation timestamp wins — a
-   * robustness fallback, never the expected path.
-   */
-  frameIndexForTimestampUs(timestampUs: number): number {
-    const exact = this.tsToFrame.get(timestampUs);
-    if (exact !== undefined) return exact;
-    // Binary search the (ascending) presentation timestamps for the nearest.
-    const ts = this.presTimestampsUs;
-    let lo = 0;
-    let hi = ts.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if ((ts[mid] as number) < timestampUs) lo = mid + 1;
-      else hi = mid;
-    }
-    if (lo > 0) {
-      const below = ts[lo - 1] as number;
-      if (timestampUs - below <= (ts[lo] as number) - timestampUs) return lo - 1;
-    }
-    return lo;
-  }
-
-  private checkFrameIndex(frameIndex: number, method: string): void {
-    if (!Number.isInteger(frameIndex) || frameIndex < 0 || frameIndex >= this.frameCount) {
-      throw new InvalidStateError(
-        `SampleTable.${method}: frame index ${frameIndex} outside [0, ${this.frameCount})`,
-      );
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// mp4box demux (environment-agnostic; unit-tested in node)
-// ---------------------------------------------------------------------------
-
-/** One encoded sample ready to wrap in an `EncodedVideoChunk`. */
-interface EncodedSample {
-  data: Uint8Array;
+/** One demuxed sample, in decode order, with its bytes copied out of mp4box. */
+interface DecodedSample {
+  /** Presentation timestamp in microseconds (from `cts`, the decoder chunk timestamp). */
   timestampUs: number;
-  durationUs: number;
+  /** Whether this sample is a sync sample (keyframe / GOP boundary). */
   isSync: boolean;
+  /** Encoded sample bytes (owned copy — mp4box may recycle its buffers). */
+  data: Uint8Array;
 }
 
-/** Everything {@link WebCodecsFrameSource} needs, extracted from one MP4. */
-export interface DemuxResult {
+/** Everything demux produces: the sample table plus the decoder config and index maps. */
+interface DemuxResult {
   info: VideoSourceInfo;
-  table: SampleTable;
-  /** Encoded samples in DECODE order. */
-  samples: readonly EncodedSample[];
   config: VideoDecoderConfig;
+  /** Samples in decode order (mp4box `sample.number` order). */
+  samples: DecodedSample[];
+  /** `displayToDecode[displayIndex] = decodeIndex`, sorted by presentation time. */
+  displayToDecode: number[];
+  /** `timestampUs → displayIndex`, to map a decoded frame back to its presentation index. */
+  displayIndexByTs: Map<number, number>;
+  /** Decode indices that are sync samples, ascending. */
+  syncIndices: number[];
+}
+
+/** mp4box sample-entry shape carrying a codec-configuration child box we can serialize. */
+interface ConfigBoxHolder {
+  write(stream: DataStream): void;
+}
+
+function readConfigBox(entry: unknown): ConfigBoxHolder | undefined {
+  const e = entry as Record<string, unknown>;
+  const box = e['avcC'] ?? e['hvcC'] ?? e['av1C'] ?? e['vpcC'];
+  if (box && typeof (box as { write?: unknown }).write === 'function') {
+    return box as ConfigBoxHolder;
+  }
+  return undefined;
 }
 
 /**
- * Serialize the codec-private description box (`avcC`/`hvcC`) of the track's
- * sample entry, minus its 8-byte box header — the `VideoDecoderConfig
- * .description` WebCodecs expects for AVC/HEVC in length-prefixed (mp4)
- * form. VP9/AV1 need no description; `undefined` is returned for them.
+ * Serialize the codec-configuration box (avcC/hvcC/av1C/vpcC) to the raw bytes
+ * WebCodecs wants as `VideoDecoderConfig.description` — the box payload with its
+ * 8-byte (size + fourcc) header stripped. `undefined` when the codec carries
+ * its parameter sets in-band (e.g. avc3/annexb), in which case no description
+ * is needed.
  */
-function extractDescription(entries: readonly unknown[]): Uint8Array | undefined {
+function extractDescription(file: ISOFile, trackId: number): Uint8Array | undefined {
+  const trak = file.getTrackById(trackId) as unknown as {
+    mdia?: { minf?: { stbl?: { stsd?: { entries?: unknown[] } } } };
+  };
+  const entries = trak?.mdia?.minf?.stbl?.stsd?.entries ?? [];
   for (const entry of entries) {
-    const visual = entry as Partial<Pick<VisualSampleEntry, 'avcC' | 'hvcC'>>;
-    const box = visual.avcC ?? visual.hvcC;
+    const box = readConfigBox(entry);
     if (box) {
-      const stream = new MultiBufferStream();
+      // Default endianness is BIG_ENDIAN, which is what the ISO box format uses.
+      const stream = new DataStream();
       box.write(stream);
       return new Uint8Array(stream.buffer, 8);
     }
@@ -225,392 +86,347 @@ function extractDescription(entries: readonly unknown[]): Uint8Array | undefined
 }
 
 /**
- * Parse a complete MP4 buffer with mp4box and extract the first video
- * track's metadata, sample table, and encoded samples.
- *
- * @throws InvalidStateError — not a parseable MP4, no `moov`, no video
- * track, or a demux/sample inconsistency. The message names the failure;
- * the mp4box cause is chained where one exists.
+ * Demux an MP4 `Blob` into a sample table + decoder config. Rejects with
+ * `InvalidStateError` when the blob is not a decodable MP4 with a video track.
  */
-export function demuxMp4(buffer: ArrayBuffer): DemuxResult {
+async function demux(blob: Blob): Promise<DemuxResult> {
   const file = createFile();
-  let movie: Movie | undefined;
-  let demuxError: string | undefined;
-  const collected: Sample[] = [];
-  file.onError = (module, message) => {
-    demuxError = `${module}: ${message}`;
-  };
-  file.onSamples = (_id, _user, samples) => {
-    collected.push(...samples);
-  };
-  // Extraction options MUST be registered inside onReady — mp4box processes
-  // samples during the same appendBuffer that parses moov, and options set
-  // after the append are never applied to already-processed data.
-  file.onReady = (info) => {
-    movie = info;
-    const videoTrack = info.videoTracks[0];
-    if (videoTrack) {
-      file.setExtractionOptions(videoTrack.id, undefined, { nbSamples: videoTrack.nb_samples });
-      file.start();
-    }
-  };
-  try {
-    file.appendBuffer(MP4BoxBuffer.fromArrayBuffer(buffer, 0), /* last */ true);
-    file.flush();
-  } catch (err) {
-    throw new InvalidStateError('demuxMp4: failed to parse MP4 container', { cause: err });
-  }
-  file.stop();
-  if (demuxError !== undefined) {
-    throw new InvalidStateError(`demuxMp4: MP4 parse error (${demuxError})`);
-  }
-  if (!movie) {
-    throw new InvalidStateError('demuxMp4: not an MP4 (no moov box found)');
-  }
-  const track = movie.videoTracks[0];
-  if (!track) {
-    throw new InvalidStateError('demuxMp4: MP4 contains no video track');
-  }
-  if (collected.length !== track.nb_samples) {
-    throw new InvalidStateError(
-      `demuxMp4: extracted ${collected.length} of ${track.nb_samples} samples`,
-    );
-  }
+  const arrayBuffer = await blob.arrayBuffer();
 
-  const timescale = track.timescale;
-  const table = new SampleTable(
-    collected.map((s) => ({ dts: s.dts, cts: s.cts, duration: s.duration, isSync: s.is_sync })),
-    timescale,
-  );
-  const samples: EncodedSample[] = collected.map((s, i) => {
-    if (!s.data) {
-      throw new InvalidStateError(`demuxMp4: sample ${i} carries no data`);
-    }
-    return {
-      data: s.data,
-      timestampUs: Math.round((s.cts * 1e6) / timescale),
-      durationUs: Math.round((s.duration * 1e6) / timescale),
-      isSync: s.is_sync,
+  return await new Promise<DemuxResult>((resolve, reject) => {
+    let settled = false;
+    const fail = (message: string): void => {
+      if (settled) return;
+      settled = true;
+      reject(new InvalidStateError(message));
     };
-  });
 
-  const width = track.video?.width ?? track.track_width;
-  const height = track.video?.height ?? track.track_height;
-  const info: VideoSourceInfo = {
-    frameCount: table.frameCount,
-    fps: table.fps,
-    width,
-    height,
-    durationUs: table.durationUs,
-    codec: track.codec,
-  };
-  const description = extractDescription(
-    file.getTrackById(track.id)?.mdia?.minf?.stbl?.stsd?.entries ?? [],
-  );
-  const config: VideoDecoderConfig = {
-    codec: track.codec,
-    codedWidth: width,
-    codedHeight: height,
-    ...(description ? { description } : {}),
-  };
-  return { info, table, samples, config };
-}
+    file.onError = (module, message) => {
+      fail(`not a decodable MP4 (${module}: ${message})`);
+    };
 
-// ---------------------------------------------------------------------------
-// The decoder-driving FrameSource (browser/worker only)
-// ---------------------------------------------------------------------------
-
-/** Max encoded chunks queued inside the VideoDecoder before feeding pauses. */
-const MAX_DECODE_QUEUE = 4;
-/** Max decoded frames held for an un-pulling consumer before feeding pauses. */
-const MAX_UNCONSUMED_FRAMES = 2;
-
-/**
- * One in-flight sequential read. Pull-driven: `next()` pumps the decoder;
- * an un-pulled iterator stalls with at most {@link MAX_UNCONSUMED_FRAMES}
- * decoded frames + {@link MAX_DECODE_QUEUE} encoded chunks in flight.
- */
-class ReadIterator implements AsyncIterableIterator<DecodedFrame> {
-  private readonly decoder: VideoDecoder;
-  private readonly queue: DecodedFrame[] = [];
-  private waiters: (() => void)[] = [];
-  private feedIndex: number;
-  private readonly lastFeedIndex: number;
-  private remaining: number;
-  private flushRequested = false;
-  private flushSettled = false;
-  private settled = false;
-  private failure: Error | undefined;
-
-  constructor(
-    private readonly samples: readonly EncodedSample[],
-    private readonly table: SampleTable,
-    private readonly startFrame: number,
-    private readonly endFrame: number,
-    config: VideoDecoderConfig,
-    private readonly onSettled: () => void,
-  ) {
-    this.feedIndex = table.syncDecodeIndexFor(startFrame);
-    this.lastFeedIndex = table.lastDecodeIndexFor(startFrame, endFrame);
-    this.remaining = endFrame - startFrame;
-    this.decoder = new VideoDecoder({
-      output: (frame) => this.onFrame(frame),
-      error: (err) =>
-        this.fail(new InvalidStateError(`read(): VideoDecoder error: ${err.message}`, { cause: err })),
-    });
-    // Re-pump when the decoder drains its input queue — feeding is gated on
-    // decodeQueueSize, and without this a paused feed would never resume.
-    this.decoder.ondequeue = () => this.pump();
-    this.decoder.configure(config);
-  }
-
-  /** Frames decoded but not yet yielded (the source's leak witness). */
-  get liveFrames(): number {
-    return this.queue.length;
-  }
-
-  [Symbol.asyncIterator](): AsyncIterableIterator<DecodedFrame> {
-    return this;
-  }
-
-  async next(): Promise<IteratorResult<DecodedFrame>> {
-    for (;;) {
-      if (this.failure) {
-        const err = this.failure;
-        this.cancel();
-        throw err;
+    file.onReady = (movie) => {
+      const track = movie.videoTracks[0];
+      if (!track) {
+        fail('MP4 has no video track');
+        return;
       }
-      if (this.queue.length > 0) {
-        const value = this.queue.shift() as DecodedFrame;
-        this.remaining--;
-        // Settle as soon as the last frame leaves: the source slot frees up
-        // without requiring a trailing next(), and leftover frames (none in
-        // the normal path) get closed.
-        if (this.remaining === 0) this.cancel();
-        return { value, done: false };
+      const video = track.video;
+      if (!video) {
+        fail('MP4 video track has no visual sample entry');
+        return;
       }
-      if (this.settled || this.remaining === 0) {
-        this.cancel();
-        return { value: undefined, done: true };
-      }
-      if (this.flushSettled) {
-        this.fail(
-          new InvalidStateError(
-            `read(): decoder drained after ${this.endFrame - this.startFrame - this.remaining}` +
-              ` of ${this.endFrame - this.startFrame} frames`,
-          ),
-        );
-        continue;
-      }
-      this.pump();
-      await new Promise<void>((resolve) => this.waiters.push(resolve));
-    }
-  }
 
-  async return(): Promise<IteratorResult<DecodedFrame>> {
-    this.cancel();
-    return { value: undefined, done: true };
-  }
+      const collected: DecodedSample[] = [];
+      const decodeOrder: number[] = [];
 
-  async throw(err?: unknown): Promise<IteratorResult<DecodedFrame>> {
-    this.cancel();
-    throw err;
-  }
+      file.onSamples = (_id, _user, samples) => {
+        if (settled) return;
+        for (const sample of samples) {
+          if (!sample.data) continue;
+          const idx = sample.number;
+          // Copy: mp4box may release the backing buffer via releaseUsedSamples.
+          collected[idx] = {
+            timestampUs: Math.round((sample.cts * 1_000_000) / sample.timescale),
+            isSync: sample.is_sync,
+            data: sample.data.slice(),
+          };
+          decodeOrder.push(idx);
+        }
+        file.releaseUsedSamples(track.id, decodeOrder.length);
 
-  /**
-   * Cancel/settle: close the decoder and every frame still held here.
-   * Frames already yielded belong to the consumer. Idempotent.
-   */
-  cancel(): void {
-    if (this.settled) return;
-    this.settled = true;
-    for (const queued of this.queue) queued.frame.close();
-    this.queue.length = 0;
-    if (this.decoder.state !== 'closed') this.decoder.close();
-    this.onSettled();
-    this.notify();
-  }
+        if (decodeOrder.length < track.nb_samples) return;
 
-  private onFrame(frame: VideoFrame): void {
-    const frameIndex = this.table.frameIndexForTimestampUs(frame.timestamp);
-    // Warm-up frames (sync sample → startFrame) and post-range spill are
-    // closed immediately — they never count as live.
-    if (this.settled || frameIndex < this.startFrame || frameIndex >= this.endFrame) {
-      frame.close();
+        // All samples in hand — assemble the decode-ordered table.
+        const orderedSamples: DecodedSample[] = [];
+        for (let i = 0; i < track.nb_samples; i++) {
+          const s = collected[i];
+          if (!s) {
+            fail(`MP4 sample table gap at index ${i}`);
+            return;
+          }
+          orderedSamples.push(s);
+        }
+
+        // Presentation order: decode indices sorted by presentation timestamp.
+        const displayToDecode = orderedSamples
+          .map((_s, decodeIndex) => decodeIndex)
+          .sort((a, b) => {
+            const ta = orderedSamples[a]!.timestampUs;
+            const tb = orderedSamples[b]!.timestampUs;
+            return ta === tb ? a - b : ta - tb;
+          });
+
+        const displayIndexByTs = new Map<number, number>();
+        displayToDecode.forEach((decodeIndex, displayIndex) => {
+          displayIndexByTs.set(orderedSamples[decodeIndex]!.timestampUs, displayIndex);
+        });
+
+        const syncIndices = orderedSamples
+          .map((s, decodeIndex) => (s.isSync ? decodeIndex : -1))
+          .filter((v) => v >= 0);
+        if (syncIndices.length === 0 || syncIndices[0] !== 0) {
+          // Every decodable MP4 starts its first GOP with a sync sample.
+          fail('MP4 video track has no leading keyframe');
+          return;
+        }
+
+        const durationUs = Math.round((track.duration * 1_000_000) / track.timescale);
+        const durationSeconds = durationUs / 1_000_000;
+        const info: VideoSourceInfo = {
+          frameCount: track.nb_samples,
+          fps: durationSeconds > 0 ? track.nb_samples / durationSeconds : 0,
+          width: video.width,
+          height: video.height,
+          durationUs,
+          codec: track.codec,
+        };
+
+        const config: VideoDecoderConfig = {
+          codec: track.codec,
+          codedWidth: video.width,
+          codedHeight: video.height,
+        };
+        const description = extractDescription(file, track.id);
+        if (description) config.description = description;
+
+        settled = true;
+        resolve({
+          info,
+          config,
+          samples: orderedSamples,
+          displayToDecode,
+          displayIndexByTs,
+          syncIndices,
+        });
+      };
+
+      file.setExtractionOptions(track.id, null, { nbSamples: track.nb_samples });
+      file.start();
+    };
+
+    const mp4Buffer = MP4BoxBuffer.fromArrayBuffer(arrayBuffer, 0);
+    try {
+      file.appendBuffer(mp4Buffer);
+      file.flush();
+    } catch (err) {
+      fail(`failed to parse MP4: ${(err as Error).message}`);
       return;
     }
-    this.queue.push({ frameIndex, timestampUs: frame.timestamp, frame });
-    this.notify();
+    // A valid MP4 fires onReady synchronously during appendBuffer/flush; if it
+    // has not, the blob is not a parseable MP4.
+    fail('not a decodable MP4 (no moov box found)');
+  });
+}
+
+/**
+ * A short-lived `VideoDecoder` wrapper that decodes one GOP's worth of samples
+ * and collects the output frames. `decodeGop` flushes, so on return every
+ * output frame for the fed samples has been emitted.
+ */
+class GopDecoder {
+  #decoder: VideoDecoder;
+  #pending: VideoFrame[] = [];
+  #fatal: Error | null = null;
+
+  constructor(config: VideoDecoderConfig) {
+    this.#decoder = new VideoDecoder({
+      output: (frame) => this.#pending.push(frame),
+      error: (err) => {
+        this.#fatal = err;
+      },
+    });
+    try {
+      this.#decoder.configure(config);
+    } catch (err) {
+      throw new InvalidStateError(`unsupported video config: ${(err as Error).message}`);
+    }
   }
 
-  /** Feed the decoder up to the watermarks; flush once everything is fed. */
-  private pump(): void {
-    if (this.settled || this.failure) return;
-    while (
-      this.feedIndex <= this.lastFeedIndex &&
-      this.decoder.decodeQueueSize < MAX_DECODE_QUEUE &&
-      this.queue.length < MAX_UNCONSUMED_FRAMES
-    ) {
-      const sample = this.samples[this.feedIndex] as EncodedSample;
-      this.decoder.decode(
+  /** Decode `samples` (a full GOP, key sample first) and return the output frames. */
+  async decodeGop(samples: readonly DecodedSample[]): Promise<VideoFrame[]> {
+    this.#pending = [];
+    for (const sample of samples) {
+      this.#decoder.decode(
         new EncodedVideoChunk({
           type: sample.isSync ? 'key' : 'delta',
           timestamp: sample.timestampUs,
-          duration: sample.durationUs,
           data: sample.data,
         }),
       );
-      this.feedIndex++;
     }
-    if (this.feedIndex > this.lastFeedIndex && !this.flushRequested) {
-      this.flushRequested = true;
-      // Reordered tails only surface on flush. Rejection is expected when
-      // cancel() closed the decoder mid-flush; real failures already went
-      // through the error callback.
-      this.decoder.flush().then(
-        () => {
-          this.flushSettled = true;
-          this.notify();
-        },
-        () => {
-          this.flushSettled = true;
-          this.notify();
-        },
-      );
+    await this.#decoder.flush();
+    if (this.#fatal) {
+      const err = this.#fatal;
+      this.#fatal = null;
+      throw new InvalidStateError(`video decode failed: ${err.message}`);
     }
+    const out = this.#pending;
+    this.#pending = [];
+    return out;
   }
 
-  private fail(err: Error): void {
-    if (!this.failure) this.failure = err;
-    this.notify();
-  }
-
-  private notify(): void {
-    const waiters = this.waiters;
-    this.waiters = [];
-    for (const wake of waiters) wake();
+  /** Close the decoder and any output frames not yet handed out. */
+  close(): void {
+    for (const frame of this.#pending) {
+      try {
+        frame.close();
+      } catch {
+        /* already closed */
+      }
+    }
+    this.#pending = [];
+    if (this.#decoder.state !== 'closed') {
+      try {
+        this.#decoder.close();
+      } catch {
+        /* already closed */
+      }
+    }
   }
 }
 
-/**
- * {@link FrameSource} over mp4box demux + WebCodecs `VideoDecoder`.
- * Construct via {@link createWebCodecsFrameSource}.
- */
+/** {@link FrameSource} over an MP4 `Blob`, using mp4box + WebCodecs. */
 export class WebCodecsFrameSource implements FrameSource {
   readonly info: VideoSourceInfo;
-  private readonly table: SampleTable;
-  private readonly samples: readonly EncodedSample[];
-  private readonly config: VideoDecoderConfig;
-  private activeRead: ReadIterator | undefined;
-  private disposed = false;
 
-  /** @internal Use {@link createWebCodecsFrameSource}. */
-  constructor(demuxed: DemuxResult) {
+  #demux: DemuxResult;
+  #closed = false;
+
+  private constructor(demuxed: DemuxResult) {
+    this.#demux = demuxed;
     this.info = demuxed.info;
-    this.table = demuxed.table;
-    this.samples = demuxed.samples;
-    this.config = demuxed.config;
   }
 
-  read(startFrame: number, endFrame: number): AsyncIterableIterator<DecodedFrame> {
-    this.ensureIdle('read');
-    if (
-      !Number.isInteger(startFrame) ||
-      !Number.isInteger(endFrame) ||
-      startFrame < 0 ||
-      startFrame >= endFrame ||
-      endFrame > this.info.frameCount
-    ) {
-      throw new InvalidStateError(
-        `read(${startFrame}, ${endFrame}): expected integers with` +
-          ` 0 <= start < end <= ${this.info.frameCount}`,
-      );
+  /** Demux `blob` and construct a source. Rejects `InvalidStateError` on a bad/undecodable MP4. */
+  static async create(blob: Blob): Promise<WebCodecsFrameSource> {
+    return new WebCodecsFrameSource(await demux(blob));
+  }
+
+  /** Largest sync-sample decode index at or before `decodeIndex`. */
+  #gopStart(decodeIndex: number): number {
+    const { syncIndices } = this.#demux;
+    let start = syncIndices[0]!;
+    for (const s of syncIndices) {
+      if (s <= decodeIndex) start = s;
+      else break;
     }
-    const iterator = new ReadIterator(
-      this.samples,
-      this.table,
-      startFrame,
-      endFrame,
-      this.config,
-      () => {
-        if (this.activeRead === iterator) this.activeRead = undefined;
-      },
-    );
-    this.activeRead = iterator;
-    return iterator;
+    return start;
+  }
+
+  /** Last decode index of the GOP that `decodeIndex` belongs to. */
+  #gopEnd(decodeIndex: number): number {
+    const { syncIndices, samples } = this.#demux;
+    const start = this.#gopStart(decodeIndex);
+    const next = syncIndices.find((s) => s > start);
+    return next === undefined ? samples.length - 1 : next - 1;
   }
 
   async frameAt(frameIndex: number): Promise<VideoFrame> {
-    this.ensureIdle('frameAt');
-    if (!Number.isInteger(frameIndex) || frameIndex < 0 || frameIndex >= this.info.frameCount) {
+    this.#assertOpen();
+    const { frameCount } = this.info;
+    if (!Number.isInteger(frameIndex) || frameIndex < 0 || frameIndex >= frameCount) {
       throw new InvalidStateError(
-        `frameAt(${frameIndex}): frame index outside [0, ${this.info.frameCount})`,
+        `frameAt(${frameIndex}) out of range [0, ${frameCount})`,
       );
     }
-    const iterator = this.read(frameIndex, frameIndex + 1);
+
+    const targetDecode = this.#demux.displayToDecode[frameIndex]!;
+    const gopStart = this.#gopStart(targetDecode);
+    const gopEnd = this.#gopEnd(targetDecode);
+    const gop = this.#demux.samples.slice(gopStart, gopEnd + 1);
+
+    const decoder = new GopDecoder(this.#demux.config);
     try {
-      const result = await iterator.next();
-      if (result.done) {
-        throw new InvalidStateError(`frameAt(${frameIndex}): decoder produced no frame`);
+      const frames = await decoder.decodeGop(gop);
+      let found: VideoFrame | undefined;
+      for (const frame of frames) {
+        if (found === undefined && this.#displayIndexOf(frame.timestamp) === frameIndex) {
+          found = frame;
+        } else {
+          frame.close();
+        }
       }
-      return result.value.frame;
+      if (!found) {
+        throw new InvalidStateError(`frame ${frameIndex} did not decode`);
+      }
+      return found;
     } finally {
-      await iterator.return?.();
+      decoder.close();
     }
   }
 
-  /**
-   * Live-resource census (same shape idea as `Backend.debugStats`, §1.1):
-   * frames the SOURCE currently holds. Yielded frames are the caller's and
-   * never count. Zero whenever no read is active — the browser test's
-   * no-dangling-frames witness.
-   */
-  debugStats(): { liveFrames: number } {
-    return { liveFrames: this.activeRead?.liveFrames ?? 0 };
+  async *read(range?: Partial<FrameRange>): AsyncIterableIterator<DecodedFrame> {
+    this.#assertOpen();
+    const { frameCount } = this.info;
+    const startFrame = Math.max(0, Math.trunc(range?.startFrame ?? 0));
+    const endFrame = Math.min(frameCount, Math.trunc(range?.endFrame ?? frameCount));
+    if (startFrame >= endFrame) return;
+
+    // Decode-index span that produces the wanted presentation frames.
+    const wantedDecode: number[] = [];
+    for (let display = startFrame; display < endFrame; display++) {
+      wantedDecode.push(this.#demux.displayToDecode[display]!);
+    }
+    const minDecode = Math.min(...wantedDecode);
+    const maxDecode = Math.max(...wantedDecode);
+    const stopDecode = this.#gopEnd(maxDecode);
+
+    const decoder = new GopDecoder(this.#demux.config);
+    // Frames decoded and in-range but not yet yielded — closed by finally on abort.
+    const undelivered = new Set<VideoFrame>();
+    try {
+      let cursor = this.#gopStart(minDecode);
+      while (cursor <= stopDecode) {
+        const gopEnd = this.#gopEnd(cursor);
+        const gop = this.#demux.samples.slice(cursor, gopEnd + 1);
+        const frames = await decoder.decodeGop(gop);
+
+        const inRange: DecodedFrame[] = [];
+        for (const frame of frames) {
+          const displayIndex = this.#displayIndexOf(frame.timestamp);
+          if (displayIndex !== undefined && displayIndex >= startFrame && displayIndex < endFrame) {
+            undelivered.add(frame);
+            inRange.push({ frame, frameIndex: displayIndex, timestampUs: frame.timestamp });
+          } else {
+            frame.close();
+          }
+        }
+        inRange.sort((a, b) => a.frameIndex - b.frameIndex);
+
+        for (const item of inRange) {
+          undelivered.delete(item.frame);
+          yield item;
+        }
+        cursor = gopEnd + 1;
+      }
+    } finally {
+      for (const frame of undelivered) {
+        try {
+          frame.close();
+        } catch {
+          /* already closed */
+        }
+      }
+      undelivered.clear();
+      decoder.close();
+    }
   }
 
-  dispose(): void {
-    if (this.disposed) return;
-    this.disposed = true;
-    this.activeRead?.cancel();
+  async close(): Promise<void> {
+    this.#closed = true;
   }
 
-  private ensureIdle(method: string): void {
-    if (this.disposed) {
-      throw new InvalidStateError(`${method}: FrameSource is disposed`);
-    }
-    if (this.activeRead) {
-      throw new InvalidStateError(
-        `${method}: a read() is already active — finish or return() it first` +
-          ' (one sequential reader per source)',
-      );
-    }
+  #displayIndexOf(timestampUs: number): number | undefined {
+    return this.#demux.displayIndexByTs.get(timestampUs);
+  }
+
+  #assertOpen(): void {
+    if (this.#closed) throw new InvalidStateError('frame source is closed');
   }
 }
 
-/**
- * Demux an MP4 blob and stand up a WebCodecs-backed {@link FrameSource}.
- *
- * The blob is read fully into worker memory (encoded bytes only — decoded
- * frames stay bounded by the read watermarks).
- *
- * @throws InvalidStateError — WebCodecs unavailable in this environment,
- * the blob is not a valid MP4 with a video track ({@link demuxMp4}'s
- * errors), or `VideoDecoder` cannot decode the track's codec.
- */
-export async function createWebCodecsFrameSource(source: Blob): Promise<WebCodecsFrameSource> {
-  if (typeof VideoDecoder !== 'function' || typeof EncodedVideoChunk !== 'function') {
-    throw new InvalidStateError(
-      'createWebCodecsFrameSource: WebCodecs (VideoDecoder) is not available in this environment',
-    );
-  }
-  const buffer = await source.arrayBuffer();
-  const demuxed = demuxMp4(buffer);
-  const support = await VideoDecoder.isConfigSupported(demuxed.config).catch(() => undefined);
-  if (!support?.supported) {
-    throw new InvalidStateError(
-      `createWebCodecsFrameSource: VideoDecoder cannot decode codec '${demuxed.info.codec}'`,
-    );
-  }
-  return new WebCodecsFrameSource(demuxed);
+/** Demux an MP4 `Blob` and return a ready {@link FrameSource}. */
+export function createWebCodecsFrameSource(blob: Blob): Promise<FrameSource> {
+  return WebCodecsFrameSource.create(blob);
 }

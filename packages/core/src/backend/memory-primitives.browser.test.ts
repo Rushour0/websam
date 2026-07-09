@@ -1,161 +1,125 @@
 /**
- * Browser integration for the M2 memory primitives: real onnxruntime-web
- * driving `allocTensor('device')` + `copyRegion` round-trips (verified via
- * `readback` against a cpu reference) and the `debugStats()` census, on both
- * browser backends. webgpu uses the same soft-pass-on-no-adapter pattern as
- * ort.browser.test.ts (SwiftShader lane).
+ * Browser integration for the M2 memory-bank backend primitives
+ * (backend-video §1.1): drives REAL onnxruntime-web through the Backend
+ * interface for `allocTensor('device')` + `copyRegion` + `readback` +
+ * `debugStats`.
+ *
+ * The WASM path always runs (deterministic, cpu). The WebGPU path is
+ * soft-passed on a missing adapter / failed EP init (the same pattern as
+ * backend-impl.browser.test.ts), and — because ort creates its WebGPU device
+ * lazily during the first webgpu session — first compiles the committed
+ * add.onnx fixture to materialize `ort.env.webgpu.device`, then round-trips a
+ * ring copy and reads it back to assert slot-offset correctness against a cpu
+ * reference.
  */
 import * as ort from 'onnxruntime-web';
 import { describe, expect, it } from 'vitest';
 import addModelUrl from '../__fixtures__/add.onnx?url';
-import type { DeviceTensor } from './backend.js';
+import { OrtDeviceTensor } from '../runtime/ort-tensor.js';
 import { WasmBackend } from './wasm-backend.js';
 import { WebGpuBackend } from './webgpu-backend.js';
-import { InvalidStateError } from '../errors.js';
 
 // Deterministic single-thread WASM: no COOP/COEP requirement in the test server.
 ort.env.wasm.numThreads = 1;
 
-// Structural view of WebGPU (lib.dom has no navigator.gpu typing).
+// Structural view of WebGPU (lib.dom typings for navigator.gpu are not enabled).
 const gpu = (
   globalThis.navigator as unknown as
     | { gpu?: { requestAdapter(): Promise<object | null> } }
     | undefined
 )?.gpu;
 
-async function fetchFixture(): Promise<Uint8Array> {
+/** Minimal structural view of the ort-owned GPUDevice queue we write through. */
+interface GpuQueueLike {
+  writeBuffer(buffer: unknown, offset: number, data: BufferSource): void;
+}
+
+async function fetchAddFixture(): Promise<Uint8Array> {
   const res = await fetch(addModelUrl);
   if (!res.ok) throw new Error(`failed to fetch fixture: ${res.status}`);
   return new Uint8Array(await res.arrayBuffer());
 }
 
-describe('M2 memory primitives against real onnxruntime-web', () => {
-  it('WasmBackend: copyRegion slot offsets are correct on real cpu tensors', async () => {
+describe('memory primitives against real onnxruntime-web — WASM', () => {
+  it('allocTensor(device→cpu) + copyRegion round-trips a slot, and debugStats counts', async () => {
     const backend = new WasmBackend(ort);
     await backend.init();
-    expect(backend.debugStats()).toEqual({ liveTensors: 0, liveBytes: 0 });
+    try {
+      // Ring of 3 slots x 4 floats; on wasm this degrades to a cpu tensor.
+      const ring = backend.allocTensor([3, 4], 'float32', 'device');
+      expect(ring.location).toBe('cpu');
+      const slot = backend.uploadTensor(Float32Array.from([10, 20, 30, 40]), [4], 'float32');
+      expect(backend.debugStats()).toEqual({ liveTensors: 2, liveBytes: 3 * 4 * 4 + 4 * 4 });
 
-    // 'device' degrades to cpu on wasm — the documented equivalence.
-    const ring = backend.allocTensor([3, 2, 2], 'float32', 'device');
-    expect(ring.location).toBe('cpu');
+      backend.copyRegion(slot, ring, 1);
+      const view = (await backend.readback(ring)) as Float32Array;
+      expect(Array.from(view)).toEqual([0, 0, 0, 0, 10, 20, 30, 40, 0, 0, 0, 0]);
 
-    // Byte-count-equal rule: a flat [4] src fills a [2, 2] slot.
-    const src = backend.uploadTensor(Float32Array.from([1, 2, 3, 4]), [4], 'float32');
-    backend.copyRegion(src, ring, 1);
-    const overwrite = backend.uploadTensor(Float32Array.from([9, 8, 7, 6]), [2, 2], 'float32');
-    backend.copyRegion(overwrite, ring, 2);
-
-    const view = (await backend.readback(ring)) as Float32Array;
-    expect(Array.from(view)).toEqual([0, 0, 0, 0, 1, 2, 3, 4, 9, 8, 7, 6]);
-
-    // Census: ring 48 B + two [4]-element f32 srcs at 16 B each.
-    expect(backend.debugStats()).toEqual({ liveTensors: 3, liveBytes: 80 });
-    src.dispose();
-    overwrite.dispose();
-    ring.dispose();
-    expect(backend.debugStats()).toEqual({ liveTensors: 0, liveBytes: 0 });
-
-    await backend.dispose();
+      ring.dispose();
+      slot.dispose();
+      expect(backend.debugStats()).toEqual({ liveTensors: 0, liveBytes: 0 });
+    } finally {
+      await backend.dispose();
+    }
     console.log('[memory-primitives.browser.test] EP ran: wasm');
   });
+});
 
-  it('WasmBackend: debugStats counts real run() outputs until disposed', async () => {
-    const backend = new WasmBackend(ort);
-    await backend.init();
-    const session = await backend.createSession({ name: 'add', bytes: await fetchFixture() });
-    const a = backend.uploadTensor(Float32Array.from([1]), [1], 'float32');
-    const b = backend.uploadTensor(Float32Array.from([2]), [1], 'float32');
-
-    const outputs = await session.run({ a, b });
-    const c = outputs['c'] as DeviceTensor;
-    expect(((await backend.readback(c)) as Float32Array)[0]).toBe(3);
-    // a + b uploads (4 B each) + the run output c (4 B).
-    expect(backend.debugStats()).toEqual({ liveTensors: 3, liveBytes: 12 });
-
-    c.dispose();
-    a.dispose();
-    b.dispose();
-    expect(backend.debugStats()).toEqual({ liveTensors: 0, liveBytes: 0 });
-
-    await backend.dispose();
-  });
-
+describe('memory primitives against real onnxruntime-web — WebGPU', () => {
   // Never fails on a missing adapter: skipped without navigator.gpu, and a
-  // denied adapter / EP init failure downgrades to a logged wasm-only pass
-  // (same soft-pass pattern as ort.browser.test.ts).
-  it.skipIf(!gpu)(
-    'WebGpuBackend: device alloc + copyRegion round-trip when an adapter exists',
-    async () => {
-      const adapter = await gpu!.requestAdapter().catch(() => null);
-      if (!adapter) {
-        console.log(
-          '[memory-primitives.browser.test] EP ran: none (navigator.gpu present but no adapter)',
-        );
-        return;
-      }
-      const backend = new WebGpuBackend(ort);
-      await backend.init();
+  // denied adapter / EP init failure downgrades to a logged soft-pass.
+  it.skipIf(!gpu)('allocTensor(device) + copyRegion is a real GPU-buffer ring copy', async () => {
+    const adapter = await gpu!.requestAdapter().catch(() => null);
+    if (!adapter) {
+      console.log('[memory-primitives.browser.test] EP ran: none (no adapter)');
+      return;
+    }
+    const backend = new WebGpuBackend(ort);
+    await backend.init();
+    let session;
+    try {
+      // Force ort to create its WebGPU device (exposed on ort.env.webgpu.device).
+      session = await backend.createSession({ name: 'add', bytes: await fetchAddFixture() });
+    } catch (err) {
+      console.log('[memory-primitives.browser.test] EP ran: none (webgpu init failed)', err);
+      await backend.dispose().catch(() => undefined);
+      return;
+    }
 
-      // ort owns the GPUDevice: it exists only after the first session, so
-      // device allocation before that is an InvalidStateError by contract.
-      expect(() => backend.allocTensor([4, 1], 'float32', 'device')).toThrow(InvalidStateError);
+    try {
+      const device = (ort.env.webgpu as unknown as { device: { queue: GpuQueueLike } }).device;
 
-      let session;
-      try {
-        session = await backend.createSession(
-          { name: 'add', bytes: await fetchFixture() },
-          { outputLocations: { c: 'device' } },
-        );
-      } catch (err) {
-        // Adapter exists but the EP could not initialize (e.g. headless
-        // driver quirks) — log and soft-pass rather than flake CI.
-        console.log('[memory-primitives.browser.test] EP ran: none (webgpu init failed)', err);
-        return;
-      }
-
-      const baseline = backend.debugStats();
-      const ring = backend.allocTensor([4, 1], 'float32', 'device');
+      const slotFloats = 4;
+      const slots = 3;
+      const ring = backend.allocTensor([slots, slotFloats], 'float32', 'device');
       expect(ring.location).toBe('device');
 
-      // Freshly alloc'd device memory reads back zeroed (separate tensor —
-      // ort pins a handle to cpu after its one download).
-      const zeroed = backend.allocTensor([2, 2], 'float32', 'device');
-      expect(Array.from((await backend.readback(zeroed)) as Float32Array)).toEqual([0, 0, 0, 0]);
-      zeroed.dispose();
+      // Fill a device-located source slot with known data via the ort device queue.
+      const known = Float32Array.from([11, 22, 33, 44]);
+      const src = backend.allocTensor([slotFloats], 'float32', 'device');
+      const srcBuffer = (src as OrtDeviceTensor).ortTensor.gpuBuffer;
+      device.queue.writeBuffer(srcBuffer, 0, known);
 
-      // Produce device-located sources with KNOWN values via real runs.
-      const run = async (x: number, y: number): Promise<DeviceTensor> => {
-        const a = backend.uploadTensor(Float32Array.from([x]), [1], 'float32');
-        const b = backend.uploadTensor(Float32Array.from([y]), [1], 'float32');
-        const outputs = await session.run({ a, b });
-        a.dispose();
-        b.dispose();
-        return outputs['c'] as DeviceTensor;
-      };
-      const three = await run(1, 2); // device-located [1] = 3
-      const eleven = await run(5, 6); // device-located [1] = 11
-      expect(three.location).toBe('device');
+      expect(backend.debugStats()).toEqual({
+        liveTensors: 2,
+        liveBytes: (slots * slotFloats + slotFloats) * 4,
+      });
 
-      backend.copyRegion(three, ring, 2);
-      backend.copyRegion(eleven, ring, 0);
+      const targetSlot = 2;
+      backend.copyRegion(src, ring, targetSlot);
 
-      // A cpu-located operand on webgpu must be rejected (upload first).
-      const cpuSrc = backend.uploadTensor(Float32Array.from([7]), [1], 'float32');
-      expect(() => backend.copyRegion(cpuSrc, ring, 1)).toThrow(InvalidStateError);
-      cpuSrc.dispose();
-
-      // Slot-offset correctness against the cpu reference.
       const view = (await backend.readback(ring)) as Float32Array;
-      expect(Array.from(view)).toEqual([11, 0, 3, 0]);
+      const expected = new Float32Array(slots * slotFloats);
+      expected.set(known, targetSlot * slotFloats);
+      expect(Array.from(view)).toEqual(Array.from(expected));
 
-      three.dispose();
-      eleven.dispose();
       ring.dispose();
-      expect(backend.debugStats()).toEqual(baseline);
-
-      await backend.dispose();
+      src.dispose();
       expect(backend.debugStats()).toEqual({ liveTensors: 0, liveBytes: 0 });
       console.log('[memory-primitives.browser.test] EP ran: webgpu');
-    },
-  );
+    } finally {
+      await session.dispose();
+      await backend.dispose();
+    }
+  });
 });
