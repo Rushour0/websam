@@ -123,8 +123,26 @@ packages (code-only, MIT).
   multi-object default).
 - iOS Safari = EdgeTAM-only experimental; WASM video = EdgeTAM-int8 only; PNG-zip is the portable
   matte export (VP9-alpha is Chrome-only, and not implemented yet regardless — M4).
-- `examples/quickstart` is a workspace member (`examples/*` added to `pnpm-workspace.yaml`) but is
-  **not** built by CI's `build-and-test` job (`pnpm -r --filter './apps/**' build` only covers
-  `apps/**`) — its own `tsc --noEmit && vite build` gate has only been run locally so far. Add
-  `examples/**` to that CI filter (or a dedicated step) if this example is meant to stay
-  gate-checked long-term.
+- `examples/quickstart` (`db1d736`) — minimal vanilla-TS + Vite getting-started app on the real
+  `@websam3/core` API; now built by CI (`build-and-test` builds `./apps/**` + `./examples/**`).
+
+## Active workstream — Studio product + fabri (started 2026-07-10)
+
+Direction set by the user: build a **small in-browser video Studio** (React) where someone can
+view / edit / drag videos on a timeline, drive segmentation (rotobrush), and export — and land it
+as a **full product with fabri agent orchestration in it** (fabri = the user's agent engine at
+`/Users/rushour0/gba/fabri`, Python/BUSL-1.1). This promotes M5 to active and adds a Studio app.
+
+Scope in flight (Sonnet scoping agents running as of 2026-07-10):
+- **fabri internals** — how its tool/domain system + agent loop work, and the cleanest way to add a
+  `video_editing` tool domain that drives websam WITHOUT touching fabri core (BUSL).
+- **React studio stack** — pick high-support packages (drag/timeline, frame-accurate playback,
+  canvas overlay, state, export) and an MVP component architecture (MediaLibrary / Timeline /
+  Preview-Canvas / PropertiesPanel / Toolbar).
+- **Integration architecture** — the crux: how Python fabri drives a browser studio/lib
+  (candidates: OrtNodeBackend for a Node path, an edit-plan JSON the studio executes, or headless
+  browser). To be decided from the scoping results before building.
+
+Deliverables targeted: `apps/studio` (React video editor on `@websam3/*`), `integrations/fabri`
+(video_editing tool domain + text→prompt via a vision LLM), and the bridge between them. Weight
+hosting (below) is a hard dependency for a runnable product.
