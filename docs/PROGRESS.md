@@ -144,5 +144,15 @@ Scope in flight (Sonnet scoping agents running as of 2026-07-10):
   browser). To be decided from the scoping results before building.
 
 Deliverables targeted: `apps/studio` (React video editor on `@websam3/*`), `integrations/fabri`
-(video_editing tool domain + text→prompt via a vision LLM), and the bridge between them. Weight
-hosting (below) is a hard dependency for a runnable product.
+(video_editing tool domain + text→prompt via a vision LLM), and the bridge between them.
+
+**PLAN WRITTEN (build later): `docs/plans/studio-and-fabri-product.md`** (commit `568ee62`).
+Decisions locked: (1) **Studio MVP first**, then fabri. (2) **Bundle EdgeTAM fp16 weights** in the app
+for now (defer CDN). (3) fabri drives segmentation via **sandbox Python-onnxruntime tools** reusing the
+exported EdgeTAM graphs + `e2e_loop.py` — NO browser, NO OrtNodeBackend needed; text→prompt grounding
+is a *tool* (frame extract → vision LLM → box JSON), so fabri's text-only LLM loop never needs image
+input. Pattern mirrors `ludexel-gba/.agent/fabri_agent.yaml` + `tools/agent_tools/`. Studio stack:
+dnd-kit + react-konva + zustand + shadcn/react-resizable-panels + WebCodecs + mediabunny (all
+permissive; avoid Remotion — company-size license). Studio component arch + fabri tool list are in the
+plan. Also to close during this work: real `useImageSession`/`useVideoSession` hooks +
+`AlphaMatteExporter` cutout.
