@@ -4,26 +4,20 @@
  * No props; reads/writes only through `useStudioStore`. Shows properties of
  * the current `selection`: trim in/out steppers for a selected timeline
  * clip; the tracked-object list for the active clip (color swatch, label,
- * select, remove via `store.removeObject`); a mask-opacity slider for the
- * selected object; a export-settings sub-panel that mirrors the Toolbar's
+ * select, remove via `store.removeObject`); a mask-opacity slider
+ * (`store.maskOpacity`/`store.setMaskOpacity`, consumed by `PreviewCanvas`'s
+ * overlay rendering); a export-settings sub-panel that mirrors the Toolbar's
  * export actions (`exportMatte` / `exportMp4Cutout`, same store calls, no
  * duplicated logic); and a load-model panel (`store.loadModel`) with
  * progress, the ~120MB/device note, and cached/ready state. Read-only-
  * friendly when nothing is selected — sections simply don't render instead
  * of showing empty/broken controls.
  *
- * CONTRACT NOTE (flagged, not fixed here — this file may only touch
- * PropertiesPanel.tsx): §3 asks for a "mask opacity slider (store state)"
- * and export "range", but `StudioState` (studio-store.ts) has no
- * `maskOpacity`/`setMaskOpacity` field and `exportMatte`/`exportMp4Cutout`
- * take only `clipId` (no range). The opacity slider below is therefore
- * local component state only — it does not yet affect `PreviewCanvas`'s
- * overlay rendering, since that would require a store field this file
- * doesn't own. Export range is not exposed by the seam (`export.ts` always
- * exports the full mask timeline), so no range control is rendered. Both
- * should be added to `StudioState`/`export.ts` in a follow-up.
+ * CONTRACT NOTE: §3 also asks for an export "range", but
+ * `exportMatte`/`exportMp4Cutout` take only `clipId` (no range) — that seam
+ * isn't exposed by `export.ts` (always exports the full mask timeline), so
+ * no range control is rendered here. Follow-up.
  */
-import { useState } from 'react';
 import { Loader2, Trash2 } from 'lucide-react';
 
 import { useStudioStore } from '../store/studio-store.js';
@@ -135,8 +129,8 @@ function ObjectsProperties(): React.ReactElement | null {
   const activeClipId = useStudioStore((s) => s.activeClipId);
   const objects = useStudioStore((s) => s.objects);
   const selectedObjectId = useStudioStore((s) => s.selection.objectId);
-  // Local-only per §3 mismatch note above — not wired into PreviewCanvas.
-  const [maskOpacity, setMaskOpacity] = useState(0.5);
+  const maskOpacity = useStudioStore((s) => s.maskOpacity);
+  const setMaskOpacity = useStudioStore((s) => s.setMaskOpacity);
 
   if (!activeClipId) return null;
 

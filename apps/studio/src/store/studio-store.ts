@@ -120,6 +120,8 @@ export interface StudioState {
   objects: TrackedObject[];
   maskTimelines: Record<string, MaskTimeline>;
   liveMasksAtFrame: Record<number, MaskResult>;
+  /** Mask-overlay opacity in `PreviewCanvas`, 0..1 (store-owned per studio-contracts.md §3). */
+  maskOpacity: number;
 
   // segmenter lifecycle
   modelStatus: ModelStatus;
@@ -146,6 +148,7 @@ export interface StudioState {
   setTool: (tool: ToolMode) => void;
   selectTimelineClip: (id: string | null) => void;
   selectObject: (objectId: number | null) => void;
+  setMaskOpacity: (opacity: number) => void;
 
   loadModel: () => Promise<void>;
 
@@ -208,6 +211,7 @@ export const useStudioStore = create<StudioState>()(
     objects: [],
     maskTimelines: {},
     liveMasksAtFrame: {},
+    maskOpacity: 0.5,
 
     modelStatus: { phase: 'idle' },
     resolvedDevice: null,
@@ -329,14 +333,29 @@ export const useStudioStore = create<StudioState>()(
       });
     },
 
+    // Clamps `inFrame < outFrame` within `[0, frameCount)` (studio-contracts.md
+    // §6.2) — out-of-range or inverted requests are clamped into the valid
+    // range, then (if still zero-length after clamping) nudged apart by one
+    // frame rather than stored verbatim.
     trimTimelineClip: (timelineClipId: string, inFrame: number, outFrame: number) => {
       set((state) => {
         const existing = state.timelineClips[timelineClipId];
         if (!existing) return {};
+        const clip = state.clips[existing.clipId];
+        const maxFrame = clip ? Math.max(0, clip.frameCount - 1) : Math.max(0, inFrame, outFrame);
+
+        let finalIn = Math.min(Math.max(0, inFrame), maxFrame);
+        let finalOut = Math.min(Math.max(0, outFrame), maxFrame);
+        if (finalIn > finalOut) [finalIn, finalOut] = [finalOut, finalIn];
+        if (finalIn === finalOut) {
+          if (finalOut < maxFrame) finalOut += 1;
+          else if (finalIn > 0) finalIn -= 1;
+        }
+
         return {
           timelineClips: {
             ...state.timelineClips,
-            [timelineClipId]: { ...existing, inFrame, outFrame },
+            [timelineClipId]: { ...existing, inFrame: finalIn, outFrame: finalOut },
           },
         };
       });
@@ -373,7 +392,10 @@ export const useStudioStore = create<StudioState>()(
     // ---------------------------------------------------------------------
     // playback / view actions
     // ---------------------------------------------------------------------
-    setPlayhead: (frame: number) => set({ playhead: frame }),
+    // Clamps to a non-negative frame index (studio-contracts.md §6.2:
+    // "setPlayhead clamps to [0, projectDuration)"; the upper bound is a
+    // per-clip/timeline concern enforced by callers, not tracked here).
+    setPlayhead: (frame: number) => set({ playhead: Math.max(0, frame) }),
     setIsPlaying: (playing: boolean) => set({ isPlaying: playing }),
     setZoom: (pxPerFrame: number) => set({ zoom: Math.max(0.01, pxPerFrame) }),
 
@@ -392,6 +414,7 @@ export const useStudioStore = create<StudioState>()(
       set((state) => ({ selection: { ...state.selection, timelineClipId: id, objectId: id === null ? state.selection.objectId : null } })),
     selectObject: (objectId: number | null) =>
       set((state) => ({ selection: { ...state.selection, objectId, timelineClipId: objectId === null ? state.selection.timelineClipId : null } })),
+    setMaskOpacity: (opacity: number) => set({ maskOpacity: Math.min(1, Math.max(0, opacity)) }),
 
     // ---------------------------------------------------------------------
     // segmenter lifecycle

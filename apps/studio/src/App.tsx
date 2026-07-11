@@ -10,18 +10,21 @@
  * reorder/move (§3's DnD-ownership note). Also renders a small global error
  * boundary + `notice` toast for the store's `notice` field.
  */
-import { Component, useCallback, useRef } from 'react';
+import { Component, useCallback, useEffect, useRef } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
-import { DndContext } from '@dnd-kit/core';
+import { DndContext, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
 import type { DragEndEvent } from '@dnd-kit/core';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 
 import { useStudioStore } from './store/studio-store.js';
+import type { TimelineClip } from './store/studio-store.js';
 import { Toolbar } from './components/Toolbar.js';
 import { MediaLibrary } from './components/MediaLibrary.js';
 import { PreviewCanvas } from './components/PreviewCanvas.js';
 import { PropertiesPanel } from './components/PropertiesPanel.js';
 import { Timeline } from './components/Timeline.js';
+import { disposeAllClips } from './segmentation/session-manager.js';
+import { disposeSegmenter } from './segmentation/segmenter-lifecycle.js';
 
 /**
  * Shape stashed on a `@dnd-kit/core` draggable's `data.current` by
@@ -52,6 +55,40 @@ function isDragData(value: unknown): value is DragData {
 
 function isDropData(value: unknown): value is DropData {
   return typeof value === 'object' && value !== null && (value as { kind?: unknown }).kind === 'track';
+}
+
+/**
+ * Anti-overlap clamp for `handleDragEnd` (bug #2): pushes `desiredStart`
+ * right past any timeline clip already on `trackId` (excluding `excludeId`,
+ * the clip being dragged in the intra-timeline move case) that its
+ * `[start, start + durationFrames)` span would overlap. Iterates to a fixed
+ * point since pushing past one clip can create a new overlap with the next.
+ */
+function findNonOverlappingStart(
+  timelineClips: Record<string, TimelineClip>,
+  trackId: string,
+  desiredStart: number,
+  durationFrames: number,
+  excludeId?: string,
+): number {
+  const others = Object.values(timelineClips)
+    .filter((tc) => tc.trackId === trackId && tc.id !== excludeId)
+    .map((tc) => ({ start: tc.startFrame, end: tc.startFrame + (tc.outFrame - tc.inFrame + 1) }))
+    .sort((a, b) => a.start - b.start);
+
+  let start = Math.max(0, desiredStart);
+  let moved = true;
+  while (moved) {
+    moved = false;
+    for (const o of others) {
+      const end = start + durationFrames;
+      if (start < o.end && end > o.start) {
+        start = o.end;
+        moved = true;
+      }
+    }
+  }
+  return start;
 }
 
 /** Minimal class-component error boundary — hooks have no boundary equivalent. */
@@ -122,7 +159,14 @@ export function App(): JSX.Element {
   const addTrack = useStudioStore((s) => s.addTrack);
   const tracks = useStudioStore((s) => s.tracks);
   const timelineClips = useStudioStore((s) => s.timelineClips);
+  const clips = useStudioStore((s) => s.clips);
   const zoom = useStudioStore((s) => s.zoom);
+
+  // Bug #3: without an activation constraint, a plain click on a
+  // draggable+clickable card (ClipCard/ClipBlock) can be swallowed by a
+  // sub-pixel micro-drag before dnd-kit ever fires onClick. Require the
+  // pointer to move a few px before a drag starts.
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
 
   const handleDragEnd = useCallback(
     (event: DragEndEvent) => {
@@ -139,31 +183,57 @@ export function App(): JSX.Element {
       if (active.kind === 'media-library-clip') {
         // No drop-point frame is available — append the new clip after the
         // last clip currently on the target track (falls back to frame 0 for
-        // an empty track), avoiding an overlap with existing timeline clips.
+        // an empty track), then clamp against overlap (bug #2) in case the
+        // track was created above and `timelineClips` doesn't reflect it yet.
+        const sourceClip = clips[active.clipId];
+        const durationFrames = sourceClip ? Math.max(1, sourceClip.frameCount) : 1;
         const trackClips = Object.values(timelineClips).filter((tc) => tc.trackId === trackId);
-        const startFrame = trackClips.reduce(
+        const desiredStart = trackClips.reduce(
           (end, tc) => Math.max(end, tc.startFrame + (tc.outFrame - tc.inFrame + 1)),
           0,
         );
+        const startFrame = findNonOverlappingStart(timelineClips, trackId, desiredStart, durationFrames);
         addTimelineClip(active.clipId, trackId, startFrame);
       } else if (active.kind === 'timeline-clip') {
         // Derive the new position from the pointer delta Timeline's own
         // zoom-aware layout uses (`px-per-frame`), applied to the clip's
-        // pre-drag `startFrame`.
+        // pre-drag `startFrame`, then clamp against overlap with the other
+        // clips already on the destination track (bug #2).
         const existing = timelineClips[active.timelineClipId];
         const deltaFrames = zoom > 0 ? Math.round(event.delta.x / zoom) : 0;
-        const startFrame = Math.max(0, (existing?.startFrame ?? 0) + deltaFrames);
+        const desiredStart = Math.max(0, (existing?.startFrame ?? 0) + deltaFrames);
+        const durationFrames = existing ? existing.outFrame - existing.inFrame + 1 : 1;
+        const startFrame = findNonOverlappingStart(
+          timelineClips,
+          trackId,
+          desiredStart,
+          durationFrames,
+          active.timelineClipId,
+        );
         moveTimelineClip(active.timelineClipId, trackId, startFrame);
       }
     },
-    [tracks, timelineClips, zoom, addTrack, addTimelineClip, moveTimelineClip],
+    [tracks, timelineClips, clips, zoom, addTrack, addTimelineClip, moveTimelineClip],
   );
+
+  useEffect(() => {
+    const onPageHide = (): void => {
+      disposeAllClips();
+      void disposeSegmenter();
+    };
+    window.addEventListener('pagehide', onPageHide);
+    return () => {
+      window.removeEventListener('pagehide', onPageHide);
+      disposeAllClips();
+      void disposeSegmenter();
+    };
+  }, []);
 
   return (
     <ErrorBoundary>
       <div className="flex h-full w-full flex-col bg-background text-foreground">
         <Toolbar />
-        <DndContext onDragEnd={handleDragEnd}>
+        <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
           <div className="min-h-0 flex-1">
             <PanelGroup direction="vertical">
               <Panel defaultSize={70} minSize={30}>

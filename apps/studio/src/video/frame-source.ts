@@ -27,30 +27,73 @@ export interface ClipProbe {
 const DEFAULT_FPS_ESTIMATE = 30;
 
 /**
+ * Ceiling on how long `probeClipMeta` waits for the `<video>` element's
+ * `loadedmetadata`/`error` events. Documented headless-Chromium flake: for
+ * some inputs neither event ever fires, which previously left `importClip`
+ * (studio-store.ts) awaiting forever with no error surfaced. 7s comfortably
+ * covers real-browser metadata reads (near-instant) while bounding the flake.
+ */
+const PROBE_TIMEOUT_MS = 7000;
+
+/**
+ * Sentinel dimensions used only when the timeout fires — i.e. the browser
+ * never told us the real size. `frameCountGuessed` is already `true` in this
+ * case (as always), and `activateClip` (session-manager.ts) still corrects
+ * everything from `attachSource`'s real values once the model loads.
+ */
+const FALLBACK_DIM = 0;
+
+function fallbackProbe(): ClipProbe {
+  return {
+    durationSec: 0,
+    fps: DEFAULT_FPS_ESTIMATE,
+    width: FALLBACK_DIM,
+    height: FALLBACK_DIM,
+    frameCount: 1,
+    frameCountGuessed: true,
+  };
+}
+
+/**
  * Probe a file's duration/dimensions via a throwaway `<video>` element, used
  * at `importClip` time — before any `Segmenter`/`VideoSession` exists — so
  * `MediaLibrary` can show duration/thumbnails pre-model-load. `fps` is only
  * an estimate; `activateClip` (session-manager.ts) corrects it (and
  * `frameCount`/`frameCountGuessed`) once `attachSource` runs.
+ *
+ * Races the `<video>` element's events against `PROBE_TIMEOUT_MS`: on real
+ * browsers `loadedmetadata` (or a genuine `error`) fires almost immediately
+ * and wins the race, so the happy path is unchanged. If neither event fires
+ * in time (the flake this guards against), resolves with a best-effort
+ * sentinel `ClipProbe` instead of hanging forever — `importClip` always
+ * completes, and downstream `attachSource` still corrects the guessed
+ * fields once the model loads.
  */
 export function probeClipMeta(file: File | Blob): Promise<ClipProbe> {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const video = document.createElement('video');
     video.preload = 'metadata';
     video.muted = true;
     const url = URL.createObjectURL(file);
 
+    let settled = false;
     const cleanup = () => {
       video.removeEventListener('loadedmetadata', onLoaded);
       video.removeEventListener('error', onError);
+      clearTimeout(timeoutId);
       URL.revokeObjectURL(url);
+    };
+    const settle = (probe: ClipProbe) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(probe);
     };
     const onLoaded = () => {
       const durationSec = Number.isFinite(video.duration) ? video.duration : 0;
       const fps = DEFAULT_FPS_ESTIMATE;
       const frameCount = Math.max(1, Math.round(durationSec * fps));
-      cleanup();
-      resolve({
+      settle({
         durationSec,
         fps,
         width: video.videoWidth,
@@ -59,10 +102,14 @@ export function probeClipMeta(file: File | Blob): Promise<ClipProbe> {
         frameCountGuessed: true,
       });
     };
-    const onError = () => {
-      cleanup();
-      reject(new Error('probeClipMeta: the browser could not read metadata for this file'));
-    };
+    // A genuine decode/format error also resolves with the sentinel probe
+    // rather than rejecting — `importClip` has no real fallback path for a
+    // rejected probe, and a degraded-but-real clip entry (corrected later by
+    // `attachSource`) is strictly better than either a hang or a thrown
+    // error mid-import.
+    const onError = () => settle(fallbackProbe());
+    const timeoutId = setTimeout(() => settle(fallbackProbe()), PROBE_TIMEOUT_MS);
+
     video.addEventListener('loadedmetadata', onLoaded);
     video.addEventListener('error', onError);
     video.src = url;

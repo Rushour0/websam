@@ -45,9 +45,6 @@ export interface PreviewCanvasProps {
   stageContainerRef: RefObject<HTMLDivElement>;
 }
 
-/** Mask overlay alpha — matches the demo's alpha=128 default. */
-const MASK_ALPHA = 128;
-
 /** One accumulated click for the object currently being prompted at a frame. */
 interface ClickPoint {
   x: number;
@@ -60,17 +57,18 @@ function hexToRgb(hex: string): [number, number, number] {
   return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
 }
 
-/** Recolor a mask's opaque-white `ImageData` into `color` at `MASK_ALPHA`, then decode to a bitmap. */
-async function maskToColoredBitmap(mask: MaskResult, color: string): Promise<ImageBitmap> {
+/** Recolor a mask's opaque-white `ImageData` into `color` at `opacity` (0..1, from `store.maskOpacity`), then decode to a bitmap. */
+async function maskToColoredBitmap(mask: MaskResult, color: string, opacity: number): Promise<ImageBitmap> {
   const imageData = mask.toImageData();
   const [r, g, b] = hexToRgb(color);
+  const alpha = Math.round(Math.min(1, Math.max(0, opacity)) * 255);
   const data = imageData.data;
   for (let i = 0; i < data.length; i += 4) {
     if (data[i + 3] !== 0) {
       data[i] = r;
       data[i + 1] = g;
       data[i + 2] = b;
-      data[i + 3] = MASK_ALPHA;
+      data[i + 3] = alpha;
     }
   }
   return createImageBitmap(imageData);
@@ -96,6 +94,7 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
   const setPlayhead = useStudioStore((s) => s.setPlayhead);
   const objects = useStudioStore((s) => s.objects);
   const liveMasksAtFrame = useStudioStore((s) => s.liveMasksAtFrame);
+  const maskOpacity = useStudioStore((s) => s.maskOpacity);
   const selection = useStudioStore((s) => s.selection);
   const trackState = useStudioStore((s) => s.trackState);
   const addPromptObject = useStudioStore((s) => s.addPromptObject);
@@ -112,7 +111,7 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
   // diff — see @websam3/core's VideoEngine#interact). Transient interaction
   // state only; never the source of truth for a mask (that's the store).
   const pointsByObjectRef = useRef<Map<number, { frameIndex: number; points: ClickPoint[] }>>(new Map());
-  const bitmapsRef = useRef<Map<number, { bitmap: ImageBitmap; maskRef: MaskResult }>>(new Map());
+  const bitmapsRef = useRef<Map<number, { bitmap: ImageBitmap; maskRef: MaskResult; opacity: number }>>(new Map());
   const [bitmapVersion, setBitmapVersion] = useState(0);
 
   const [dragBox, setDragBox] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
@@ -273,14 +272,14 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
     void Promise.all(
       visible.map(async ({ obj, mask }) => {
         const cached = bitmapsRef.current.get(obj.objectId);
-        if (cached && cached.maskRef === mask) return;
-        const bitmap = await maskToColoredBitmap(mask, obj.color);
+        if (cached && cached.maskRef === mask && cached.opacity === maskOpacity) return;
+        const bitmap = await maskToColoredBitmap(mask, obj.color, maskOpacity);
         if (cancelled) {
           bitmap.close();
           return;
         }
         cached?.bitmap.close();
-        bitmapsRef.current.set(obj.objectId, { bitmap, maskRef: mask });
+        bitmapsRef.current.set(obj.objectId, { bitmap, maskRef: mask, opacity: maskOpacity });
       }),
     ).then(() => {
       if (!cancelled) setBitmapVersion((v) => v + 1);
@@ -289,7 +288,7 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
     return () => {
       cancelled = true;
     };
-  }, [activeClipObjects, liveMasksAtFrame, playhead, trackState, activeClipId]);
+  }, [activeClipObjects, liveMasksAtFrame, playhead, trackState, activeClipId, maskOpacity]);
 
   useEffect(
     () => () => {
@@ -375,6 +374,11 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
       if (!source) return;
 
       if (tool === 'box') {
+        // Capture the pointer on the stage's DOM element so a release
+        // outside the Stage still delivers `pointerup` here (mirrors
+        // Timeline.tsx's `TrimHandle` pattern) instead of abandoning the
+        // in-progress drag.
+        stage?.content?.setPointerCapture(evt.evt.pointerId);
         setDragBox({ x1: source.x, y1: source.y, x2: source.x, y2: source.y });
         return;
       }

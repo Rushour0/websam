@@ -181,6 +181,7 @@ function ClipBlock({ timelineClip, clip, zoom, isSelected, onSelect }: ClipBlock
   });
 
   const trimTimelineClip = useStudioStore((s) => s.trimTimelineClip);
+  const moveTimelineClip = useStudioStore((s) => s.moveTimelineClip);
   const maxFrame = clip ? Math.max(0, clip.frameCount - 1) : Math.max(timelineClip.outFrame, MIN_TRIM_WIDTH_FRAMES);
 
   const durationFrames = timelineClip.outFrame - timelineClip.inFrame + 1;
@@ -191,7 +192,14 @@ function ClipBlock({ timelineClip, clip, zoom, isSelected, onSelect }: ClipBlock
     const deltaFrames = Math.round(deltaPx / zoom);
     if (deltaFrames === 0) return;
     const nextIn = clamp(timelineClip.inFrame + deltaFrames, 0, timelineClip.outFrame - MIN_TRIM_WIDTH_FRAMES);
+    // A left-trim must advance startFrame by the same amount the in-point
+    // actually moved (the clamped delta, not the raw pointer delta) so the
+    // block's on-screen left edge (`leftPx = startFrame * zoom`) tracks the
+    // new in-point and the out-point/right edge stays fixed in place.
+    const appliedDelta = nextIn - timelineClip.inFrame;
+    if (appliedDelta === 0) return;
     trimTimelineClip(timelineClip.id, nextIn, timelineClip.outFrame);
+    moveTimelineClip(timelineClip.id, timelineClip.trackId, timelineClip.startFrame + appliedDelta);
   };
   const handleTrimRight = (deltaPx: number) => {
     const deltaFrames = Math.round(deltaPx / zoom);

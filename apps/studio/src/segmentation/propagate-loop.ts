@@ -43,6 +43,22 @@ export async function drainInto(
 let activeTrack: { clipId: string; controller: AbortController } | null = null;
 
 /**
+ * Abort `clipId`'s in-flight track (if any) AND clear the `activeTrack`
+ * lock synchronously, in the same tick. `session-manager.ts`'s
+ * `disposeClipSession` calls this instead of a bare `controller.abort()` —
+ * aborting alone leaves the lock held until the aborted `propagate()`
+ * iterator actually unwinds and `startTracking`'s `finally` runs, which
+ * causes a transient spurious "already running" for a `startTracking` call
+ * that lands in that window.
+ */
+export function abortAndClearTrack(clipId: string): void {
+  if (activeTrack?.clipId === clipId) {
+    activeTrack.controller.abort();
+    activeTrack = null;
+  }
+}
+
+/**
  * Propagate every tracked object on `clipId` from `startFrame` (defaults to
  * the store's current `playhead`) through the end of the clip, draining
  * results into the clip's `MaskTimeline` via {@link drainInto} and updating
@@ -69,10 +85,17 @@ export async function startTracking(
   if (activeTrack) {
     throw new InvalidStateError('A propagate() iterator is already running for another clip.');
   }
+  // Belt-and-braces guard against the track-vs-prompting race: a fast Track
+  // must not start while `clipId` has an addPromptObject/refineObject/
+  // activateClip RPC in flight (session-manager.ts's shared busy guard).
+  if (sessionManager.isClipBusy(clipId)) {
+    throw new InvalidStateError(
+      `Clip '${clipId}' has a prompt/refine/activation in flight — try tracking again once it finishes.`,
+    );
+  }
 
   const controller = new AbortController();
   activeTrack = { clipId, controller };
-  sessionManager.registerTrackAbort(clipId, () => controller.abort());
 
   const frameCount = get().clips[clipId]?.frameCount ?? timeline.frameCount;
   const from = startFrame ?? get().playhead;
@@ -116,9 +139,9 @@ export async function startTracking(
       set({
         trackState: { phase: 'idle' },
         notice: {
-          title: 'Tracking interrupted by a refine',
+          title: 'Tracking interrupted',
           detail:
-            'A refine on this object invalidated the in-flight propagation — press Track again to resume from the current frame.',
+            'A refine, object removal, or reset invalidated the in-flight propagation — press Track again to resume from the current frame.',
           kind: 'warn',
         },
       });
@@ -126,7 +149,6 @@ export async function startTracking(
     }
     throw err;
   } finally {
-    sessionManager.unregisterTrackAbort(clipId);
     if (activeTrack?.clipId === clipId) activeTrack = null;
   }
 }

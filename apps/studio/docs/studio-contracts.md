@@ -267,7 +267,7 @@ owns `onDragEnd`, avoiding a two-file split-brain over one drag session.
 **4.1 `segmenter-lifecycle.ts`** — owns `createSegmenter()` once per app session
 (not per clip). Exports `loadSegmenter(onProgress): Promise<Segmenter>`, memoized
 module-level so `store.loadModel()` is idempotent. Config mirrors the demo:
-`{ model: 'edgetam', device: 'auto', modelBaseUrl: '/models/', workerUrl:
+`{ model: 'edgetam', device: 'auto', modelBaseUrl: '/models/edgetam/', workerUrl:
 segmenterWorkerUrl /* from '@websam3/core/worker?worker&url' */, onProgress }`.
 On success sets `modelStatus = {phase:'ready', device: segmenter.device, ...}`
 and `resolvedDevice = segmenter.device`.
@@ -362,9 +362,10 @@ export default defineConfig({
 });
 ```
 Same rationale as `apps/demo/vite.config.ts` (COOP/COEP → `crossOriginIsolated`
-→ SharedArrayBuffer → multithreaded WASM). `modelBaseUrl` stays `'/models/'`
-(not `'/models/edgetam/'`) — the registry appends the model-id subpath itself;
-mirror the demo's constant exactly.
+→ SharedArrayBuffer → multithreaded WASM). `modelBaseUrl` is `'/models/edgetam/'`
+— `packages/core`'s `resolveManifestUrl` does not append the model-id subpath,
+so the full path must be given here, matching `setup-weights.mjs`'s `DEST` and
+`segmenter-lifecycle.ts`.
 
 Tailwind: standard `tailwind.config.ts` content globs over `index.html` +
 `src/**/*.{ts,tsx}`; `postcss.config.js` with tailwindcss+autoprefixer;
