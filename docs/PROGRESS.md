@@ -143,7 +143,29 @@ Scope in flight (Sonnet scoping agents running as of 2026-07-10):
   (candidates: OrtNodeBackend for a Node path, an edit-plan JSON the studio executes, or headless
   browser). To be decided from the scoping results before building.
 
-Deliverables targeted: `apps/studio` (React video editor on `@websam3/*`), `integrations/fabri`
+### Studio MVP ✅ DONE (commits `3380704`, `6f15102`)
+
+`apps/studio` — a working browser video editor on `@websam3/core`. Toolbar / MediaLibrary /
+PreviewCanvas (video + rVFC + react-konva prompt/mask overlay) / PropertiesPanel / Timeline
+(dnd-kit + trim handles) over a zustand store; segmentation module wraps createSegmenter →
+VideoSession → propagate. Stack: React 18, react-konva ^18, @dnd-kit, zustand,
+react-resizable-panels, mediabunny, Tailwind. fp16+fp32 EdgeTAM weights bundled via
+`pnpm -F websam-studio setup-weights` (gitignored, ~120MB).
+- **Verified in a real browser** (browser-view): full UI renders; model loads on **WebGPU**
+  ("Model ready · q4f16 · webgpu"); clips import.
+- **Integration test PASSES**: `apps/studio/src/segmentation/segmentation.browser.test.ts` boots the
+  real studio seam (loadModel → activateClip → addPromptObject → startTracking) against the bundled
+  weights + golden clip → all 10 frames at IoU **0.989–0.995** (bar 0.85). Store unit tests 13/13.
+- The gate caught + fixed 4 bugs: prompt-frame mask not written to the timeline; startTracking
+  re-tracking the conditioning frame (empty); setTool during tracking; select mutual exclusion.
+  Plus `modelBaseUrl` → `/models/edgetam/`. Build green (tsc + vite).
+- Known: the UI's `probeClipMeta` (`<video>` duration probe) is flaky in HEADLESS Chromium (works in
+  a normal browser) — a UI helper, not the segmentation path; a fallback is a small follow-up.
+- Run it: `pnpm -F websam-studio setup-weights && pnpm -F websam-studio dev`.
+
+**NEXT: Phase B — fabri integration** (`integrations/fabri`).
+
+Deliverables targeted: `integrations/fabri`
 (video_editing tool domain + text→prompt via a vision LLM), and the bridge between them.
 
 **PLAN WRITTEN (build later): `docs/plans/studio-and-fabri-product.md`** (commit `568ee62`).
