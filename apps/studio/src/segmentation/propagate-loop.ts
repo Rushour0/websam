@@ -76,10 +76,21 @@ export async function startTracking(
 
   const frameCount = get().clips[clipId]?.frameCount ?? timeline.frameCount;
   const from = startFrame ?? get().playhead;
+  // Conditioning (prompt) frames already have their mask (written by
+  // addPromptObject). VideoSession.propagate() TRACKS the frames it visits —
+  // it does not re-emit a conditioning frame's prompt mask — so tracking a
+  // conditioning frame yields an empty mask. Advance the propagate start past
+  // any contiguous conditioning frames at `from`, whose masks are already in
+  // the timeline. (This is the natural "prompt, then press Track" flow.)
+  const promptFrames = new Set(
+    get().objects.filter((o) => o.clipId === clipId).map((o) => o.promptFrame),
+  );
+  let coreStart = from;
+  while (promptFrames.has(coreStart)) coreStart += 1;
   set({ trackState: { phase: 'running', clipId, frameIndex: from, frameCount } });
 
   try {
-    const iterator = session.propagate({ startFrame: from, signal: controller.signal });
+    const iterator = session.propagate({ startFrame: coreStart, signal: controller.signal });
     await drainInto(iterator, timeline, sessionManager.getEpoch(clipId), (frame) => {
       set((state) => {
         const liveMasksAtFrame = { ...state.liveMasksAtFrame };

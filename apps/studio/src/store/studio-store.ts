@@ -377,9 +377,21 @@ export const useStudioStore = create<StudioState>()(
     setIsPlaying: (playing: boolean) => set({ isPlaying: playing }),
     setZoom: (pxPerFrame: number) => set({ zoom: Math.max(0.01, pxPerFrame) }),
 
-    setTool: (tool: ToolMode) => set({ tool }),
-    selectTimelineClip: (id: string | null) => set((state) => ({ selection: { ...state.selection, timelineClipId: id } })),
-    selectObject: (objectId: number | null) => set((state) => ({ selection: { ...state.selection, objectId } })),
+    setTool: (tool: ToolMode) =>
+      set((state) => {
+        // Prompting tools are disabled while a track is running (one active
+        // propagate() iterator per session): ignore the switch, keep the
+        // current tool. Non-prompt tools (select/pan) are always allowed.
+        const isPromptTool = tool === 'point-add' || tool === 'point-remove' || tool === 'box';
+        if (state.trackState.phase === 'running' && isPromptTool) return {};
+        return { tool };
+      }),
+    // Timeline-clip selection and object selection are mutually exclusive —
+    // selecting one clears the other so the Properties panel shows a single subject.
+    selectTimelineClip: (id: string | null) =>
+      set((state) => ({ selection: { ...state.selection, timelineClipId: id, objectId: id === null ? state.selection.objectId : null } })),
+    selectObject: (objectId: number | null) =>
+      set((state) => ({ selection: { ...state.selection, objectId, timelineClipId: objectId === null ? state.selection.timelineClipId : null } })),
 
     // ---------------------------------------------------------------------
     // segmenter lifecycle

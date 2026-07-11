@@ -156,10 +156,20 @@ export async function addPromptObject(
     promptFrame: frameIndex,
   };
 
+  // The prompt frame is a CONDITIONING frame: its mask comes from addObject,
+  // not from the propagate() loop (which only covers frames after it). Persist
+  // it into the clip's MaskTimeline here, or that frame is a permanent hole in
+  // the timeline and the matte export silently drops it.
+  const timeline = get().maskTimelines[clipId];
+  if (timeline) timeline.set(String(objectId), frameIndex, mask.toRLE(), getEpoch(clipId) ?? 0);
+
   set((state) => ({
     objects: [...state.objects, tracked],
     liveMasksAtFrame: { ...state.liveMasksAtFrame, [objectId]: mask },
     selection: { ...state.selection, objectId },
+    // Nudge maskTimelines identity so timeline consumers re-render after the
+    // in-place set above.
+    maskTimelines: { ...state.maskTimelines },
   }));
 }
 
