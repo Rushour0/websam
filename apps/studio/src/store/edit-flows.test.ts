@@ -1,9 +1,11 @@
 /**
  * Studio store unit tests for realistic TIMELINE-EDIT flows: import -> place
- * on a track -> trim -> move/reorder -> multi-clip geometry. Pure-node,
- * no browser, no segmenter — same mocking pattern as `studio-store.test.ts`
- * (studio-contracts.md §6.2). The async segmentation actions themselves are
- * exercised end-to-end by `../e2e/edit-flows.browser.test.ts`, not here.
+ * on a track -> trim -> move/reorder -> multi-clip geometry, plus the
+ * drag/delete/remix primitives (removeTrack, splitTimelineClip,
+ * duplicateTimelineClip). Pure-node, no browser, no segmenter — same mocking
+ * pattern as `studio-store.test.ts` (studio-contracts.md §6.2). The async
+ * segmentation actions themselves are exercised end-to-end by
+ * `../e2e/edit-flows.browser.test.ts`, not here.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -207,5 +209,198 @@ describe('edit-flows (unit): removeTimelineClip mid-edit', () => {
     expect(state.timelineClips[tc1]).toBeUndefined();
     expect(state.timelineClips[tc2]).toMatchObject({ startFrame: 20 });
     expect(state.tracks.find((t) => t.id === trackId)?.clipIds).toEqual([tc2]);
+  });
+});
+
+describe('edit-flows (unit): removeTrack', () => {
+  beforeEach(resetStore);
+
+  it('removes the track and every timelineClip on it, leaving other tracks/clips intact', async () => {
+    const { clipId, trackId: trackA } = await importAndTrack();
+    const trackB = useStudioStore.getState().addTrack();
+    const tc1 = useStudioStore.getState().addTimelineClip(clipId, trackA, 0);
+    const tc2 = useStudioStore.getState().addTimelineClip(clipId, trackB, 0);
+
+    useStudioStore.getState().removeTrack(trackA);
+
+    const state = useStudioStore.getState();
+    expect(state.tracks.map((t) => t.id)).toEqual([trackB]);
+    expect(state.timelineClips[tc1]).toBeUndefined();
+    expect(state.timelineClips[tc2]).toMatchObject({ trackId: trackB });
+    expect(state.tracks.find((t) => t.id === trackB)?.clipIds).toEqual([tc2]);
+  });
+
+  it('renormalizes surviving track.order to 0..n-1 preserving relative order', () => {
+    const a = useStudioStore.getState().addTrack();
+    const b = useStudioStore.getState().addTrack();
+    const c = useStudioStore.getState().addTrack();
+
+    useStudioStore.getState().removeTrack(b);
+
+    const state = useStudioStore.getState();
+    expect(state.tracks.map((t) => t.id)).toEqual([a, c]);
+    expect(state.tracks.map((t) => t.order)).toEqual([0, 1]);
+  });
+
+  it('clears selection.timelineClipId iff the selected clip lived on the removed track', async () => {
+    const { clipId, trackId: trackA } = await importAndTrack();
+    const trackB = useStudioStore.getState().addTrack();
+    const tc1 = useStudioStore.getState().addTimelineClip(clipId, trackA, 0);
+    const tc2 = useStudioStore.getState().addTimelineClip(clipId, trackB, 0);
+
+    // Selected clip lives on the removed track -> selection cleared.
+    useStudioStore.getState().selectTimelineClip(tc1);
+    useStudioStore.getState().removeTrack(trackA);
+    expect(useStudioStore.getState().selection.timelineClipId).toBeNull();
+
+    // Selected clip lives on a surviving track -> selection preserved.
+    useStudioStore.getState().selectTimelineClip(tc2);
+    useStudioStore.getState().removeTrack(trackA); // already gone; no-op re: selection
+    expect(useStudioStore.getState().selection.timelineClipId).toBe(tc2);
+  });
+
+  it('is a no-op on an unknown track id', async () => {
+    const { clipId, trackId } = await importAndTrack();
+    useStudioStore.getState().addTimelineClip(clipId, trackId, 0);
+    const before = useStudioStore.getState();
+    const tracksBefore = before.tracks;
+    const clipKeysBefore = Object.keys(before.timelineClips);
+
+    useStudioStore.getState().removeTrack('nope');
+
+    const after = useStudioStore.getState();
+    expect(after.tracks).toEqual(tracksBefore);
+    expect(Object.keys(after.timelineClips)).toEqual(clipKeysBefore);
+  });
+});
+
+describe('edit-flows (unit): splitTimelineClip', () => {
+  beforeEach(resetStore);
+
+  it('splits an untrimmed clip into left/right halves at a project frame', async () => {
+    const { clipId, trackId } = await importAndTrack();
+    // frameCount=10 -> fresh clip at start 0 occupies project [0,9] with in 0/out 9.
+    const tcId = useStudioStore.getState().addTimelineClip(clipId, trackId, 0);
+
+    const newId = useStudioStore.getState().splitTimelineClip(tcId, 4);
+    expect(newId).not.toBeNull();
+    expect(newId).not.toBe(tcId);
+
+    const state = useStudioStore.getState();
+    expect(state.timelineClips[tcId]).toMatchObject({ startFrame: 0, inFrame: 0, outFrame: 3, trackId, clipId });
+    expect(state.timelineClips[newId!]).toMatchObject({ startFrame: 4, inFrame: 4, outFrame: 9, trackId, clipId });
+    const clipIds = state.tracks.find((t) => t.id === trackId)?.clipIds;
+    expect(clipIds).toHaveLength(2);
+    expect(clipIds).toContain(tcId);
+    expect(clipIds).toContain(newId);
+  });
+
+  it('splits a trimmed, moved clip using the raw project playhead frame', async () => {
+    const { clipId, trackId } = await importAndTrack();
+    const tcId = useStudioStore.getState().addTimelineClip(clipId, trackId, 0);
+    useStudioStore.getState().trimTimelineClip(tcId, 2, 8); // source [2,8]
+    useStudioStore.getState().moveTimelineClip(tcId, trackId, 10); // occupies project [10,16]
+
+    const newId = useStudioStore.getState().splitTimelineClip(tcId, 13);
+    expect(newId).not.toBeNull();
+
+    const state = useStudioStore.getState();
+    expect(state.timelineClips[tcId]).toMatchObject({ startFrame: 10, inFrame: 2, outFrame: 4 });
+    expect(state.timelineClips[newId!]).toMatchObject({ startFrame: 13, inFrame: 5, outFrame: 8 });
+  });
+
+  it('rejects splits at either boundary but allows a 1-frame right half', async () => {
+    const { clipId, trackId } = await importAndTrack();
+    const tcId = useStudioStore.getState().addTimelineClip(clipId, trackId, 0); // project [0,9]
+
+    // Boundary: atFrame at the start or one-past-the-last frame -> null, nothing mutated.
+    expect(useStudioStore.getState().splitTimelineClip(tcId, 0)).toBeNull();
+    expect(useStudioStore.getState().splitTimelineClip(tcId, 10)).toBeNull();
+    expect(useStudioStore.getState().timelineClips[tcId]).toMatchObject({ startFrame: 0, inFrame: 0, outFrame: 9 });
+    expect(useStudioStore.getState().tracks.find((t) => t.id === trackId)?.clipIds).toEqual([tcId]);
+
+    // Final assertions: splitting at the last frame is legal (1-frame right half).
+    const newId = useStudioStore.getState().splitTimelineClip(tcId, 9);
+    expect(newId).not.toBeNull();
+    const state = useStudioStore.getState();
+    expect(state.timelineClips[tcId]).toMatchObject({ startFrame: 0, inFrame: 0, outFrame: 8 });
+    expect(state.timelineClips[newId!]).toMatchObject({ startFrame: 9, inFrame: 9, outFrame: 9 });
+  });
+
+  it('returns null and mutates nothing for an unknown clip id', async () => {
+    const { clipId, trackId } = await importAndTrack();
+    const tcId = useStudioStore.getState().addTimelineClip(clipId, trackId, 0);
+    const before = useStudioStore.getState().timelineClips[tcId];
+
+    expect(useStudioStore.getState().splitTimelineClip('nope', 3)).toBeNull();
+    expect(useStudioStore.getState().timelineClips[tcId]).toEqual(before);
+  });
+});
+
+describe('edit-flows (unit): duplicateTimelineClip', () => {
+  beforeEach(resetStore);
+
+  it('places the clone immediately after an untrimmed source, leaving the source unchanged', async () => {
+    const { clipId, trackId } = await importAndTrack();
+    // frameCount=10 -> source at start 0 occupies project [0,9] with in 0/out 9.
+    const tcId = useStudioStore.getState().addTimelineClip(clipId, trackId, 0);
+
+    const dupId = useStudioStore.getState().duplicateTimelineClip(tcId);
+    expect(dupId).not.toBeNull();
+
+    const state = useStudioStore.getState();
+    expect(state.timelineClips[dupId!]).toMatchObject({ clipId, trackId, inFrame: 0, outFrame: 9, startFrame: 10 });
+    expect(state.timelineClips[tcId]).toMatchObject({ startFrame: 0, inFrame: 0, outFrame: 9 });
+    expect(state.tracks.find((t) => t.id === trackId)?.clipIds).toHaveLength(2);
+  });
+
+  it('preserves the trimmed source range on the clone and places it one duration later', async () => {
+    const { clipId, trackId } = await importAndTrack();
+    const tcId = useStudioStore.getState().addTimelineClip(clipId, trackId, 0);
+    useStudioStore.getState().trimTimelineClip(tcId, 2, 6); // source [2,6], duration 5
+
+    const dupId = useStudioStore.getState().duplicateTimelineClip(tcId);
+    expect(dupId).not.toBeNull();
+    expect(useStudioStore.getState().timelineClips[dupId!]).toMatchObject({ inFrame: 2, outFrame: 6, startFrame: 5 });
+  });
+
+  it('shifts the clone right past any same-track overlap', async () => {
+    const { clipId, trackId } = await importAndTrack();
+    const tc1 = useStudioStore.getState().addTimelineClip(clipId, trackId, 0); // project [0,9]
+    const tc2 = useStudioStore.getState().addTimelineClip(clipId, trackId, 10); // project [10,19]
+
+    const dupId = useStudioStore.getState().duplicateTimelineClip(tc1);
+    expect(dupId).not.toBeNull();
+
+    const state = useStudioStore.getState();
+    const overlaps = (a: { startFrame: number; inFrame: number; outFrame: number }, b: typeof a): boolean => {
+      const aStart = a.startFrame;
+      const aEnd = a.startFrame + (a.outFrame - a.inFrame);
+      const bStart = b.startFrame;
+      const bEnd = b.startFrame + (b.outFrame - b.inFrame);
+      return aStart <= bEnd && bStart <= aEnd;
+    };
+    const clip1 = state.timelineClips[tc1]!;
+    const clip2 = state.timelineClips[tc2]!;
+    const dup = state.timelineClips[dupId!]!;
+    expect(overlaps(clip1, clip2)).toBe(false);
+    expect(overlaps(clip1, dup)).toBe(false);
+    expect(overlaps(clip2, dup)).toBe(false);
+    // Pins today's cascade placement: desiredStart 10 collides with tc2, so it shifts past [10,19].
+    expect(dup.startFrame).toBeGreaterThanOrEqual(20);
+  });
+
+  it('returns null and mutates nothing for an unknown clip id', async () => {
+    const { clipId, trackId } = await importAndTrack();
+    useStudioStore.getState().addTimelineClip(clipId, trackId, 0);
+    const before = useStudioStore.getState();
+    const clipKeysBefore = Object.keys(before.timelineClips);
+    const tracksBefore = before.tracks;
+
+    expect(useStudioStore.getState().duplicateTimelineClip('nope')).toBeNull();
+
+    const after = useStudioStore.getState();
+    expect(Object.keys(after.timelineClips)).toEqual(clipKeysBefore);
+    expect(after.tracks).toEqual(tracksBefore);
   });
 });

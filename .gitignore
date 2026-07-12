@@ -8,3 +8,11 @@ __pycache__/
 tools/export/onnx-out/
 playwright-report/
 test-results/
+
+# Secrets — basenames match anywhere; .env.example stays tracked
+.env
+.env.local
+
+# fabri gateway per-run sandboxes (uploaded videos, traces, sqlite memory)
+integrations/fabri/runs
+.runs

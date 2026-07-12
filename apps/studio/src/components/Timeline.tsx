@@ -13,6 +13,19 @@
  * syncs to `store.playhead`, and a ruler renders time ticks derived from
  * `store.zoom`.
  *
+ * Edit/remix affordances (all delegate to the store, which owns validation):
+ *  - Per-clip hover/selected delete button → `store.removeTimelineClip`.
+ *  - Per-track hover delete button → `store.removeTrack`.
+ *  - Header buttons: Split-at-playhead → `store.splitTimelineClip`
+ *    (raw project-frame playhead), Duplicate → `store.duplicateTimelineClip`.
+ *  - Window keydown shortcuts on the selected clip (ignored while typing in a
+ *    form field or with a modifier held): Delete/Backspace remove, `s` split,
+ *    `d` duplicate. The listener reads store state imperatively via
+ *    `getState()` so it never re-binds on selection/playhead changes.
+ *  - Auto-fit: when the longest placed clip's duration changes (or the viewport
+ *    resizes) `zoom` is fit to the scroll container; the manual zoom slider
+ *    remains a working override between those events.
+ *
  * Drag payload contract (mirrors `MediaLibrary.tsx`'s `MediaLibraryDragData`
  * for the App-owned `onDragEnd` to discriminate on `event.active.data.current.kind`):
  *  - Track droppable id: `track:${track.id}`, data `{ kind: 'track', trackId }`.
@@ -22,12 +35,14 @@
 import { useDroppable } from '@dnd-kit/core';
 import { SortableContext, horizontalListSortingStrategy, useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { Copy, Scissors, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 
 import type { ClipMeta, Track, TimelineClip } from '../store/studio-store.js';
 import { useStudioStore } from '../store/studio-store.js';
 import { cn } from '../lib/utils.js';
+import { Button } from './ui/button.js';
 
 /** Drag payload shape for a Timeline track droppable (see file header). */
 export interface TimelineTrackDropData {
@@ -182,6 +197,7 @@ function ClipBlock({ timelineClip, clip, zoom, isSelected, onSelect }: ClipBlock
 
   const trimTimelineClip = useStudioStore((s) => s.trimTimelineClip);
   const moveTimelineClip = useStudioStore((s) => s.moveTimelineClip);
+  const removeTimelineClip = useStudioStore((s) => s.removeTimelineClip);
   const maxFrame = clip ? Math.max(0, clip.frameCount - 1) : Math.max(timelineClip.outFrame, MIN_TRIM_WIDTH_FRAMES);
 
   const durationFrames = timelineClip.outFrame - timelineClip.inFrame + 1;
@@ -227,7 +243,7 @@ function ClipBlock({ timelineClip, clip, zoom, isSelected, onSelect }: ClipBlock
         onSelect(timelineClip.id);
       }}
       className={cn(
-        'absolute top-1 flex cursor-grab items-center overflow-hidden rounded-md border text-[11px] shadow-sm active:cursor-grabbing',
+        'group/clip absolute top-1 flex cursor-grab items-center overflow-hidden rounded-md border text-[11px] shadow-sm active:cursor-grabbing',
         isSelected ? 'border-primary bg-primary/20' : 'border-input bg-accent/60',
         isDragging && 'opacity-50',
       )}
@@ -236,6 +252,23 @@ function ClipBlock({ timelineClip, clip, zoom, isSelected, onSelect }: ClipBlock
       <span className="pointer-events-none truncate px-3 text-foreground">
         {clip?.fileName ?? 'clip'}
       </span>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        aria-label={`Delete ${clip?.fileName ?? 'clip'}`}
+        className={cn(
+          'absolute right-3 top-1/2 z-20 h-5 w-5 shrink-0 -translate-y-1/2',
+          isSelected ? 'opacity-100' : 'opacity-0 group-hover/clip:opacity-100',
+        )}
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          removeTimelineClip(timelineClip.id);
+        }}
+      >
+        <Trash2 className="h-3 w-3" />
+      </Button>
       <TrimHandle side="right" onTrim={handleTrimRight} />
     </div>
   );
@@ -257,14 +290,32 @@ function TrackRow({ track, timelineClips, clips, zoom, widthPx, selectedTimeline
     data: { kind: 'track', trackId: track.id } satisfies TimelineTrackDropData,
   });
 
+  const removeTrack = useStudioStore((s) => s.removeTrack);
+
   const sortableIds = track.clipIds.map((id) => `timeline-clip:${id}`);
 
   return (
     <div
       ref={setNodeRef}
-      className="relative shrink-0 border-b border-border/60 bg-background"
+      className="group/track relative shrink-0 border-b border-border/60 bg-background"
       style={{ height: TRACK_HEIGHT, width: widthPx }}
     >
+      {/*
+        First positioned child: paints and hit-tests BELOW later positioned
+        siblings (the clip blocks), so a clip at startFrame 0 fully covers it
+        and its left trim handle/drag edge keep working — the delete button is
+        only clickable on uncovered lane area. No z-index by design.
+      */}
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        aria-label="Delete track"
+        className="absolute left-1 top-1/2 h-6 w-6 -translate-y-1/2 rounded-md border border-border bg-background/80 opacity-0 backdrop-blur-sm group-hover/track:opacity-100"
+        onClick={() => removeTrack(track.id)}
+      >
+        <Trash2 className="h-3 w-3" />
+      </Button>
       <SortableContext items={sortableIds} strategy={horizontalListSortingStrategy}>
         {track.clipIds.map((id) => {
           const tc = timelineClips[id];
@@ -319,8 +370,47 @@ export function Timeline(): React.JSX.Element {
   const setZoom = useStudioStore((s) => s.setZoom);
   const addTrack = useStudioStore((s) => s.addTrack);
   const selectTimelineClip = useStudioStore((s) => s.selectTimelineClip);
+  const splitTimelineClip = useStudioStore((s) => s.splitTimelineClip);
+  const duplicateTimelineClip = useStudioStore((s) => s.duplicateTimelineClip);
 
   const [isScrubbing, setIsScrubbing] = useState(false);
+
+  // Window-level keyboard shortcuts for the selected timeline clip. State is
+  // read imperatively via `getState()` (never closed over) so the single empty-
+  // deps listener always sees the live selection/playhead without re-binding.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const s = useStudioStore.getState();
+      const id = s.selection.timelineClipId;
+      if (!id) return;
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        s.removeTimelineClip(id);
+      } else if (e.key === 's' || e.key === 'S') {
+        const tc = s.timelineClips[id];
+        if (tc && s.playhead > tc.startFrame && s.playhead < tc.startFrame + (tc.outFrame - tc.inFrame + 1)) {
+          e.preventDefault();
+          s.splitTimelineClip(id, s.playhead);
+        }
+      } else if (e.key === 'd' || e.key === 'D') {
+        e.preventDefault();
+        s.duplicateTimelineClip(id);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   const fps = useMemo(() => {
     const clipList = Object.values(clips);
@@ -335,8 +425,55 @@ export function Timeline(): React.JSX.Element {
     return max;
   }, [timelineClips]);
 
-  const contentWidthPx = Math.max(800, (maxEndFrame + Math.round(fps * 5)) * zoom);
+  // Total source length of the longest placed clip, used to auto-fit the
+  // timeline to the viewport. Falls back to `outFrame + 1` when the source
+  // clip metadata is not (yet) available.
+  const fullDurationFrames = useMemo(() => {
+    let max = 0;
+    for (const tc of Object.values(timelineClips)) {
+      max = Math.max(max, clips[tc.clipId]?.frameCount ?? tc.outFrame + 1);
+    }
+    return max;
+  }, [timelineClips, clips]);
+
+  // One-second tail past the last clip: keeps a drop zone visible and feeds the
+  // same slack into the fit divisor so fit never leaves a permanent scrollbar.
+  const tailFrames = Math.round(fps);
+  const contentWidthPx =
+    fullDurationFrames > 0
+      ? Math.max(800, (Math.max(fullDurationFrames, maxEndFrame) + tailFrames) * zoom)
+      : Math.max(800, Math.round(fps * 5) * zoom);
   const tracksHeightPx = tracks.length * (TRACK_HEIGHT + TRACK_GAP);
+
+  const selectedTc = selection.timelineClipId ? timelineClips[selection.timelineClipId] : undefined;
+  const canSplit =
+    selectedTc != null &&
+    playhead > selectedTc.startFrame &&
+    playhead < selectedTc.startFrame + (selectedTc.outFrame - selectedTc.inFrame + 1);
+
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const prevFullDurationRef = useRef(0);
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el || fullDurationFrames <= 0) {
+      prevFullDurationRef.current = fullDurationFrames;
+      return;
+    }
+    const fit = () => {
+      const w = el.clientWidth;
+      if (w > 0) setZoom(clamp(w / (fullDurationFrames + tailFrames), MIN_ZOOM, MAX_ZOOM));
+    };
+    if (prevFullDurationRef.current !== fullDurationFrames) {
+      prevFullDurationRef.current = fullDurationFrames;
+      fit();
+    }
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(fit);
+    ro.observe(el);
+    return () => ro.disconnect();
+    // `zoom` is deliberately excluded (and never read inside `fit`) so the
+    // manual zoom slider stays a working override between duration/size changes.
+  }, [fullDurationFrames, tailFrames, setZoom]);
 
   const handleScrub = useCallback(
     (frame: number) => {
@@ -365,6 +502,30 @@ export function Timeline(): React.JSX.Element {
         >
           + Track
         </button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          aria-label="Split at playhead"
+          title="Split at playhead (S)"
+          className="h-6 w-6"
+          disabled={!canSplit}
+          onClick={() => selectedTc && splitTimelineClip(selectedTc.id, playhead)}
+        >
+          <Scissors className="h-3.5 w-3.5" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          aria-label="Duplicate clip"
+          title="Duplicate clip (D)"
+          className="h-6 w-6"
+          disabled={selection.timelineClipId === null}
+          onClick={() => selection.timelineClipId && duplicateTimelineClip(selection.timelineClipId)}
+        >
+          <Copy className="h-3.5 w-3.5" />
+        </Button>
         <div className="ml-auto flex items-center gap-1 text-[11px] text-muted-foreground">
           <span>Zoom</span>
           <input
@@ -380,7 +541,7 @@ export function Timeline(): React.JSX.Element {
         </div>
       </div>
 
-      <div className="relative flex-1 overflow-auto">
+      <div ref={scrollContainerRef} className="relative flex-1 overflow-auto">
         <div className="relative" style={{ width: contentWidthPx }}>
           <Ruler widthPx={contentWidthPx} zoom={zoom} fps={fps} onScrub={handleScrub} />
 

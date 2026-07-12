@@ -3,11 +3,14 @@
 # Topology: ONE domain (video_editing), so there is no spawn_subagent
 # fan-out like ludexel-gba's per-content-domain children (that project has
 # 11 domains with real cross-file dependencies; this one has 9 tools that
-# already encode their own call order via description text). `fabri run`
-# is launched with --system-prompt-file .agent/prompts/orchestrator.md,
-# which inlines domains/video_editing.md by reference (kept as a separate
-# file only so a future multi-domain video agent -- e.g. an audio_editing
-# domain alongside this one -- can reuse the split without a rewrite).
+# already encode their own call order via description text). The gateway
+# service injects .agent/prompts/orchestrator.md as a literal string via the
+# agent.system_prompt override (there is NO --system-prompt-file flag in the
+# current fabri cli.py); direct-CLI users must set agent.system_prompt in a
+# copy of this yaml. orchestrator.md inlines domains/video_editing.md by
+# reference (kept as a separate file only so a future multi-domain video
+# agent -- e.g. an audio_editing domain alongside this one -- can reuse the
+# split without a rewrite).
 #
 # Service wiring (mirrors ludexel-gba): sandbox_root is "project" --
 # relative to the per-run materialized work dir the service cd's into
@@ -74,9 +77,11 @@ agent:
   # a caller depending on outputPath should never get an unparseable result.
   error_strategy: strict
 
-  # Left empty: the service (or a dev invoking `fabri run` directly) passes
-  # --system-prompt-file .agent/prompts/orchestrator.md, which resolves the
-  # actual system_prompt at the CLI layer.
+  # Left empty here: the gateway service injects .agent/prompts/orchestrator.md
+  # as a literal string via the agent.system_prompt override at submit time
+  # (there is NO --system-prompt-file flag in the current fabri cli.py).
+  # A dev invoking `fabri run` directly must set agent.system_prompt in a
+  # copy of this yaml -- there is no CLI seam that resolves it from a file.
   system_prompt: ""
 
 llm:
@@ -84,6 +89,8 @@ llm:
   # tool-calling loop AND vid_ground_text's vision call (google-genai) share
   # one GEMINI_API_KEY -- one key to configure, no second provider account
   # needed to exercise the full happy path end to end.
+  # NOTE: provider/model/api_key_env (and narrator.model) below are the direct-CLI default/fallback.
+  # The gateway service (service/app.py) overrides them per-run from .env -- see service/settings.py build_overrides().
   provider: gemini
   # gemini-2.5-pro (not flash): grounding + multi-step tool orchestration
   # here benefits from the stronger model -- this agent's whole job is

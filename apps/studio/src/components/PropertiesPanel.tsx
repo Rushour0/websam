@@ -2,8 +2,12 @@
  * `PropertiesPanel.tsx` — studio-contracts.md §3.
  *
  * No props; reads/writes only through `useStudioStore`. Shows properties of
- * the current `selection`: trim in/out steppers for a selected timeline
- * clip; the tracked-object list for the active clip (color swatch, label,
+ * the current `selection`: for a selected timeline clip, trim in/out
+ * steppers plus delete/duplicate/split-at-playhead actions
+ * (`store.removeTimelineClip` / `duplicateTimelineClip` /
+ * `splitTimelineClip`; split is disabled unless the store playhead sits
+ * strictly inside the clip's placed span, passed as a raw project frame);
+ * the tracked-object list for the active clip (color swatch, label,
  * select, remove via `store.removeObject`); a mask-opacity slider
  * (`store.maskOpacity`/`store.setMaskOpacity`, consumed by `PreviewCanvas`'s
  * overlay rendering); a export-settings sub-panel that mirrors the Toolbar's
@@ -18,7 +22,7 @@
  * isn't exposed by `export.ts` (always exports the full mask timeline), so
  * no range control is rendered here. Follow-up.
  */
-import { Loader2, Trash2 } from 'lucide-react';
+import { Copy, Loader2, Scissors, Trash2 } from 'lucide-react';
 
 import { useStudioStore } from '../store/studio-store.js';
 import type { TrackedObject } from '../store/studio-store.js';
@@ -40,6 +44,10 @@ function ClipProperties(): React.ReactElement | null {
   const timelineClip = useStudioStore((s) => (timelineClipId ? s.timelineClips[timelineClipId] : undefined));
   const clip = useStudioStore((s) => (timelineClip ? s.clips[timelineClip.clipId] : undefined));
   const trimTimelineClip = useStudioStore((s) => s.trimTimelineClip);
+  const playhead = useStudioStore((s) => s.playhead);
+  const removeTimelineClip = useStudioStore((s) => s.removeTimelineClip);
+  const duplicateTimelineClip = useStudioStore((s) => s.duplicateTimelineClip);
+  const splitTimelineClip = useStudioStore((s) => s.splitTimelineClip);
 
   if (!timelineClip || !clip) return null;
 
@@ -48,9 +56,50 @@ function ClipProperties(): React.ReactElement | null {
   const clampIn = (value: number) => Math.min(Math.max(0, value), timelineClip.outFrame);
   const clampOut = (value: number) => Math.min(Math.max(timelineClip.inFrame, value), maxFrame);
 
+  const clipSpan = timelineClip.outFrame - timelineClip.inFrame + 1;
+  const canSplit = playhead > timelineClip.startFrame && playhead < timelineClip.startFrame + clipSpan;
+
   return (
     <section className="space-y-2 border-b border-border p-3">
-      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Clip</h3>
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Clip</h3>
+        <div className="flex items-center gap-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0"
+            aria-label="Delete clip"
+            onClick={() => removeTimelineClip(timelineClip.id)}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0"
+            aria-label="Duplicate clip"
+            onClick={() => duplicateTimelineClip(timelineClip.id)}
+          >
+            <Copy className="h-3.5 w-3.5" />
+          </Button>
+          <span title={canSplit ? undefined : 'Move the playhead inside this clip to split'}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 shrink-0"
+              aria-label="Split clip at playhead"
+              title={canSplit ? 'Split clip at playhead' : undefined}
+              disabled={!canSplit}
+              onClick={() => splitTimelineClip(timelineClip.id, playhead)}
+            >
+              <Scissors className="h-3.5 w-3.5" />
+            </Button>
+          </span>
+        </div>
+      </div>
       <p className="truncate text-sm font-medium" title={clip.fileName}>
         {clip.fileName}
       </p>

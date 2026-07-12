@@ -1,0 +1,37 @@
+# fabri gateway — self-hosted, generic compose file (no cloud/hosting target baked in).
+#
+# Run from THIS directory with:
+#   FABRI_CHECKOUT=/path/to/fabri docker compose up --build
+#
+# ../.env (git-ignored) supplies the container's runtime secrets/config —
+# OPENAI_API_KEY / GEMINI_API_KEY etc. It is passed straight into the container
+# via `env_file` below; it does NOT participate in ${VAR} substitution here.
+#
+# NOTE (verifier resolution): docker compose ${VAR} substitution reads the SHELL
+# environment and a `.env` file sitting next to THIS compose file — NOT ../.env
+# (that file only feeds the container's process env). So to change the HOST port
+# you must export it in your shell before running compose, e.g.:
+#   export FABRI_GATEWAY_PORT=9000
+# The CONTAINER side is pinned to 8787 (matching the Dockerfile CMD default) and
+# is intentionally not substitutable.
+
+services:
+  fabri-gateway:
+    build:
+      context: ../../..
+      dockerfile: integrations/fabri/service/Dockerfile
+      additional_contexts:
+        # BUSL-licensed fabri is never vendored into the repo — supply your own
+        # local checkout path via FABRI_CHECKOUT. Key name mirrors the Dockerfile header.
+        fabri-src: '${FABRI_CHECKOUT:?set FABRI_CHECKOUT to your local fabri checkout path}'
+    env_file: ../.env
+    ports:
+      # Host side substitutable (export FABRI_GATEWAY_PORT to change it);
+      # container side pinned to 8787 to match the Dockerfile CMD default —
+      # do NOT also pass FABRI_GATEWAY_PORT into the container or the pin breaks.
+      - '${FABRI_GATEWAY_PORT:-8787}:8787'
+    volumes:
+      - 'fabri-runs:/data/runs'
+
+volumes:
+  fabri-runs: {}

@@ -140,6 +140,9 @@ export interface StudioState {
   trimTimelineClip: (timelineClipId: string, inFrame: number, outFrame: number) => void;
   removeTimelineClip: (timelineClipId: string) => void;
   reorderTracks: (trackIds: string[]) => void;
+  removeTrack: (trackId: string) => void;
+  splitTimelineClip: (timelineClipId: string, atFrame: number) => string | null;
+  duplicateTimelineClip: (timelineClipId: string) => string | null;
 
   setPlayhead: (frame: number) => void;
   setIsPlaying: (playing: boolean) => void;
@@ -184,6 +187,38 @@ function genId(): string {
   return typeof crypto !== 'undefined' && 'randomUUID' in crypto
     ? crypto.randomUUID()
     : `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+/**
+ * Smallest non-negative track position at/after `desiredStart` where a clip of
+ * `durationFrames` fits without overlapping any existing same-track clip
+ * (independent copy of App.tsx's drop-placement cascade; not imported to avoid a
+ * component→store value dependency). `excludeId` skips the clip being moved.
+ */
+function findNonOverlappingStart(
+  timelineClips: Record<string, TimelineClip>,
+  trackId: string,
+  desiredStart: number,
+  durationFrames: number,
+  excludeId?: string,
+): number {
+  const occupied = Object.values(timelineClips)
+    .filter((tc) => tc.trackId === trackId && tc.id !== excludeId)
+    .map((tc) => ({ start: tc.startFrame, end: tc.startFrame + (tc.outFrame - tc.inFrame + 1) }))
+    .sort((a, b) => a.start - b.start);
+
+  let start = Math.max(0, desiredStart);
+  let moved = true;
+  while (moved) {
+    moved = false;
+    for (const range of occupied) {
+      if (start < range.end && start + durationFrames > range.start) {
+        start = range.end;
+        moved = true;
+      }
+    }
+  }
+  return start;
 }
 
 /** Friendly-notice mapping for errors thrown by the segmentation seam. */
@@ -387,6 +422,108 @@ export const useStudioStore = create<StudioState>()(
           .filter((t): t is Track => t !== null);
         return { tracks: reordered };
       });
+    },
+
+    // Deletes a track and every timelineClip on it, then renormalizes the
+    // surviving tracks' `order` to 0..n-1 preserving relative order (sort by
+    // `order` before renumbering so the result is correct regardless of array
+    // position). Source clips (`clips`) and their sessions survive — only the
+    // timeline placements go. Clears `selection.timelineClipId` iff the selected
+    // clip lived on the removed track (mirrors removeTimelineClip). No-op on
+    // unknown id.
+    removeTrack: (trackId: string) => {
+      set((state) => {
+        const track = state.tracks.find((t) => t.id === trackId);
+        if (!track) return {};
+
+        const removedIds = new Set(track.clipIds);
+        const nextTimelineClips = { ...state.timelineClips };
+        for (const id of removedIds) delete nextTimelineClips[id];
+
+        return {
+          timelineClips: nextTimelineClips,
+          tracks: [...state.tracks]
+            .filter((t) => t.id !== trackId)
+            .sort((a, b) => a.order - b.order)
+            .map((t, order) => ({ ...t, order })),
+          selection:
+            state.selection.timelineClipId && removedIds.has(state.selection.timelineClipId)
+              ? { ...state.selection, timelineClipId: null }
+              : state.selection,
+        };
+      });
+    },
+
+    // Splits a placed clip at `atFrame` (a PROJECT/timeline frame — callers pass
+    // the raw playhead, never `playhead - startFrame`). Valid iff
+    // `startFrame < atFrame < startFrame + (outFrame - inFrame + 1)`; returns the
+    // new right-half id, or null (mutating nothing) when invalid/unknown. The
+    // right half is legal even when it is a single source frame
+    // (`inFrame === outFrame`) — intentional, matching addTimelineClip's existing
+    // frameCount===1 placement; do NOT tighten to a 2-frame minimum.
+    splitTimelineClip: (timelineClipId: string, atFrame: number) => {
+      const state = get();
+      const existing = state.timelineClips[timelineClipId];
+      if (!existing) return null;
+      if (atFrame <= existing.startFrame || atFrame >= existing.startFrame + (existing.outFrame - existing.inFrame + 1)) {
+        return null;
+      }
+
+      const offset = atFrame - existing.startFrame;
+      const newId = genId();
+      const left: TimelineClip = { ...existing, outFrame: existing.inFrame + offset - 1 };
+      const right: TimelineClip = {
+        id: newId,
+        clipId: existing.clipId,
+        trackId: existing.trackId,
+        startFrame: atFrame,
+        inFrame: existing.inFrame + offset,
+        outFrame: existing.outFrame,
+      };
+
+      set((s) => ({
+        timelineClips: { ...s.timelineClips, [timelineClipId]: left, [newId]: right },
+        tracks: s.tracks.map((t) => {
+          if (t.id !== existing.trackId) return t;
+          const idx = t.clipIds.indexOf(timelineClipId);
+          const clipIds = [...t.clipIds];
+          clipIds.splice(idx === -1 ? clipIds.length : idx + 1, 0, newId);
+          return { ...t, clipIds };
+        }),
+      }));
+      return newId;
+    },
+
+    // Clones a placed clip onto the same track at the first non-overlapping
+    // position at/after `source.startFrame + duration` (i.e. immediately after
+    // the source, shifted right past any collision). Trim range and source clip
+    // are copied verbatim. Returns the clone id, or null on unknown id.
+    duplicateTimelineClip: (timelineClipId: string) => {
+      const state = get();
+      const source = state.timelineClips[timelineClipId];
+      if (!source) return null;
+
+      const duration = source.outFrame - source.inFrame + 1;
+      const startFrame = findNonOverlappingStart(
+        state.timelineClips,
+        source.trackId,
+        source.startFrame + duration,
+        duration,
+      );
+      const newId = genId();
+      const clone: TimelineClip = { ...source, id: newId, startFrame };
+
+      set((s) => ({
+        timelineClips: { ...s.timelineClips, [newId]: clone },
+        tracks: s.tracks.map((t) => {
+          if (t.id !== source.trackId) return t;
+          const idx = t.clipIds.indexOf(timelineClipId);
+          const clipIds = [...t.clipIds];
+          clipIds.splice(idx === -1 ? clipIds.length : idx + 1, 0, newId);
+          return { ...t, clipIds };
+        }),
+      }));
+      return newId;
     },
 
     // ---------------------------------------------------------------------

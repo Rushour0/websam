@@ -15,11 +15,18 @@ dependencies = [
     # LLM (GEMINI_API_KEY), so one key covers both roles. Not needed to
     # run the test suite (WEBSAM_GROUND_TEXT_STUB covers that offline).
     "google-genai>=1.0.0,<2",
+    # gateway service (service/app.py) — keep in sync with service/Dockerfile pip install list
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
+    "python-multipart>=0.0.9,<0.1",
+    "python-dotenv>=1.0,<2",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0.0,<9",
+    # fastapi.testclient.TestClient requires httpx
+    "httpx>=0.27,<1",
 ]
 
 [tool.uv]

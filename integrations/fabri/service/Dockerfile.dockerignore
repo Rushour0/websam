@@ -1,0 +1,29 @@
+# Docker build-context ignore for this service's Dockerfile.
+#
+# WHY THIS FILE EXISTS: .gitignore has NO effect on `docker COPY`. Docker only
+# consults .dockerignore files. When the build context is the repo root, a
+# `COPY integrations/fabri /repo/integrations/fabri` would otherwise bake the
+# deployer's own .env (their OPENAI/GEMINI API keys), their local .venv, and
+# runs/ (uploaded user videos, execution traces, sqlite memory) straight into a
+# shareable image — leaking secrets and private user data to anyone the image
+# is pushed/shared to.
+#
+# BuildKit reads `<Dockerfile>.dockerignore` (i.e. Dockerfile.dockerignore)
+# when building with this specific Dockerfile. BuildKit is already required for
+# the named build context, so this per-Dockerfile ignore is honored and keeps
+# secrets and local state out of both the image and the context upload.
+**/.env
+**/.env.local
+**/.venv
+**/runs
+**/.runs
+**/__pycache__
+**/.pytest_cache
+**/node_modules
+**/dist
+**/coverage
+**/playwright-report
+**/test-results
+apps
+packages
+.git

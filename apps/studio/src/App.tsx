@@ -2,7 +2,7 @@
  * App/wiring owner — studio-contracts.md §3.
  *
  * Boots the store, mounts `Toolbar` above a `react-resizable-panels` layout
- * (`MediaLibrary | (PreviewCanvas over PropertiesPanel)` with `Timeline`
+ * (`MediaLibrary | PreviewCanvas | PropertiesPanel | ChatPanel` with `Timeline`
  * docked below), owns the `<video>`/canvas ref handoff into
  * `src/segmentation/session-manager.ts` (passed as props, not store state,
  * per §3's `PreviewCanvas` contract), and owns the single shared
@@ -22,6 +22,7 @@ import { Toolbar } from './components/Toolbar.js';
 import { MediaLibrary } from './components/MediaLibrary.js';
 import { PreviewCanvas } from './components/PreviewCanvas.js';
 import { PropertiesPanel } from './components/PropertiesPanel.js';
+import { ChatPanel } from './components/ChatPanel.js';
 import { Timeline } from './components/Timeline.js';
 import { disposeAllClips } from './segmentation/session-manager.js';
 import { disposeSegmenter } from './segmentation/segmenter-lifecycle.js';
@@ -242,13 +243,15 @@ export function App(): JSX.Element {
                     <MediaLibrary />
                   </Panel>
                   <PanelResizeHandle className="w-1 bg-border transition-colors hover:bg-ring" />
-                  <Panel defaultSize={60} minSize={30}>
+                  <Panel defaultSize={44} minSize={30}>
                     <PreviewCanvas videoRef={videoRef} stageContainerRef={stageContainerRef} />
                   </Panel>
                   <PanelResizeHandle className="w-1 bg-border transition-colors hover:bg-ring" />
-                  <Panel defaultSize={20} minSize={14}>
+                  <Panel defaultSize={16} minSize={14}>
                     <PropertiesPanel />
                   </Panel>
+                  <PanelResizeHandle className="w-1 bg-border transition-colors hover:bg-ring" />
+                  <Panel defaultSize={20} minSize={14}><ChatPanel /></Panel>
                 </PanelGroup>
               </Panel>
               <PanelResizeHandle className="h-1 bg-border transition-colors hover:bg-ring" />
