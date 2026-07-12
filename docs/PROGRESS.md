@@ -163,7 +163,27 @@ react-resizable-panels, mediabunny, Tailwind. fp16+fp32 EdgeTAM weights bundled 
   a normal browser) — a UI helper, not the segmentation path; a fallback is a small follow-up.
 - Run it: `pnpm -F websam-studio setup-weights && pnpm -F websam-studio dev`.
 
-**NEXT: Phase B — fabri integration** (`integrations/fabri`).
+### fabri integration ✅ DONE (commits `1560a04`, `03a5849`)
+
+`integrations/fabri` — a fabri agent that makes/edits video by orchestrating websam, driving the SAME
+EdgeTAM graphs as the Studio but in **Python via onnxruntime** (no browser). Extends fabri via config
++ a tools dir only (BUSL core untouched), mirroring `ludexel-gba`.
+- **_websam_ort.py** — the Python-ORT tracking core reusing `e2e_loop.py`'s memory-bank choreography,
+  rewritten to the production graph contract; preprocessing verified vs the real processor (2.4e-7).
+- **9 `vid_*` tools** (manifest+script, stdin-JSON→stdout-JSON, `$FABRI_SANDBOX_ROOT`-jailed):
+  vid_track + vid_poll_job + _track_worker (submit→poll long-job), vid_segment, vid_extract_frame,
+  vid_ground_text (Gemini vision + `WEBSAM_GROUND_TEXT_STUB` keyless test path = the text→prompt step),
+  vid_export_matte, vid_composite / vid_trim / vid_concat.
+- `.agent/fabri_agent.yaml` + orchestrator/domain prompts + README; `google-genai` dep.
+- **Gate green**: `uv pytest` → 15 passed, 2 skipped (gated real-Gemini + full-agent e2e). vid_track
+  IoU 0.989–0.996/frame; vid_segment 0.989; matte.zip valid; edit ops pass.
+- Run it: `pip install -e /Users/rushour0/gba/fabri && cd integrations/fabri && uv sync`, set
+  `GEMINI_API_KEY`, then `fabri run --config .agent/fabri_agent.yaml --system-prompt-file
+  .agent/prompts/orchestrator.md "track the red object in clip.mp4 and export a matte"`.
+
+**"One core, two runtimes" proven end-to-end**: the human Studio (browser/WebGPU) and the fabri agent
+(Python/onnxruntime) both track the golden clip at IoU 0.99+ off the same EdgeTAM export.
+
 
 Deliverables targeted: `integrations/fabri`
 (video_editing tool domain + text→prompt via a vision LLM), and the bridge between them.
