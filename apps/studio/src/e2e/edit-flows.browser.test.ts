@@ -136,6 +136,7 @@ function makeClip(): ClipMeta {
     height: sharedMeta.clip.height,
     frameCount: sharedMeta.clip.numFrames,
     frameCountGuessed: true,
+    hasAudio: false,
   };
 }
 

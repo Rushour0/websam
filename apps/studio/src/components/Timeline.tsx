@@ -3,11 +3,16 @@
  * Takes no props; reads/writes exclusively through `useStudioStore`.
  *
  * Renders `tracks` as lanes with `timelineClips` positioned by
- * `startFrame` and sized by `(outFrame - inFrame + 1) * zoom`. Each clip is a
- * `@dnd-kit/sortable` item (`useSortable`) inside its track's
- * `useDroppable` lane, driven by the App-owned `<DndContext>` — this file
- * only registers draggables/droppables, it does not own `onDragEnd`
- * (contracts.md §3, "DnD ownership"). Hand-rolled pointer-event trim handles
+ * `startFrame` and sized by `(outFrame - inFrame + 1) * zoom`. Each lane
+ * carries a small normal-flow header bar (kind icon — `Film` for video,
+ * `AudioLines` for audio — plus a click-to-rename track name and a source-file
+ * caption); the header is `sticky left-0` so it stays visible under horizontal
+ * scroll and never covers clip blocks. Each clip is a `@dnd-kit/sortable` item
+ * (`useSortable`) inside its track's `useDroppable` lane, driven by the
+ * App-owned `<DndContext>` — this file only registers draggables/droppables, it
+ * does not own `onDragEnd` (contracts.md §3, "DnD ownership"). A board-level
+ * `useDroppable` on the scroll container makes media drops land even when the
+ * timeline has zero lanes. Hand-rolled pointer-event trim handles
  * on each clip's left/right edge call `store.trimTimelineClip` directly
  * (dnd-kit does drag/reorder, not resize). A draggable playhead scrubber
  * syncs to `store.playhead`, and a ruler renders time ticks derived from
@@ -29,13 +34,15 @@
  * Drag payload contract (mirrors `MediaLibrary.tsx`'s `MediaLibraryDragData`
  * for the App-owned `onDragEnd` to discriminate on `event.active.data.current.kind`):
  *  - Track droppable id: `track:${track.id}`, data `{ kind: 'track', trackId }`.
+ *  - Board droppable id: `timeline-board`, data `{ kind: 'timeline-bg' }`
+ *    (fallback drop target when there are no lanes).
  *  - Timeline-clip sortable id: `timeline-clip:${timelineClip.id}`, data
  *    `{ kind: 'timeline-clip', timelineClipId, trackId }`.
  */
 import { useDroppable } from '@dnd-kit/core';
 import { SortableContext, horizontalListSortingStrategy, useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { Copy, Scissors, Trash2 } from 'lucide-react';
+import { AudioLines, Copy, Film, Scissors, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 
@@ -50,6 +57,11 @@ export interface TimelineTrackDropData {
   trackId: string;
 }
 
+/** Drag payload shape for the board-level (empty-timeline) droppable (see file header). */
+export interface TimelineBoardDropData {
+  kind: 'timeline-bg';
+}
+
 /** Drag payload shape for a Timeline clip sortable item (see file header). */
 export interface TimelineClipDragData {
   kind: 'timeline-clip';
@@ -58,6 +70,7 @@ export interface TimelineClipDragData {
 }
 
 const TRACK_HEIGHT = 56;
+const TRACK_HEADER_HEIGHT = 20;
 const RULER_HEIGHT = 28;
 const TRACK_GAP = 4;
 const MIN_ZOOM = 0.5;
@@ -287,6 +300,23 @@ function ClipBlock({ timelineClip, clip, zoom, isSelected, onSelect }: ClipBlock
   );
 }
 
+function TrackNameLabel({ track }: { track: Track }): React.JSX.Element {
+  const renameTrack = useStudioStore((s) => s.renameTrack);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(track.name);
+  if (!editing) return (
+    <button type="button" title="Rename track" onClick={() => { setDraft(track.name); setEditing(true); }}
+      className="truncate text-[11px] font-medium text-foreground hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm">{track.name}</button>
+  );
+  const commit = () => { renameTrack(track.id, draft); setEditing(false); };
+  return (
+    <input autoFocus value={draft} aria-label="Track name" onFocus={(e) => e.currentTarget.select()}
+      onChange={(e) => setDraft(e.target.value)} onBlur={commit}
+      onKeyDown={(e) => { if (e.key === 'Enter') commit(); else if (e.key === 'Escape') setEditing(false); }}
+      className="h-4 w-28 min-w-0 rounded-sm border border-input bg-background px-1 text-[11px] text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring" />
+  );
+}
+
 interface TrackRowProps {
   track: Track;
   timelineClips: Record<string, TimelineClip>;
@@ -307,12 +337,27 @@ function TrackRow({ track, timelineClips, clips, zoom, widthPx, selectedTimeline
 
   const sortableIds = track.clipIds.map((id) => `timeline-clip:${id}`);
 
+  // Source-file caption for the header: the distinct set of underlying source
+  // filenames across this track's placed clips. Collapses to '(multiple)' once
+  // clips from more than one source file share the lane, else shows the one
+  // filename (or nothing when the lane is empty / metadata is missing).
+  const sourceFileNames = [...new Set(track.clipIds.map((id) => { const tc = timelineClips[id]; return tc ? clips[tc.clipId]?.fileName : undefined; }).filter((n): n is string => !!n))];
+  const sourceCaption = sourceFileNames.length > 1 ? '(multiple)' : sourceFileNames[0] ?? '';
+
   return (
-    <div
-      ref={setNodeRef}
-      className="group/track relative shrink-0 border-b border-border/60 bg-background"
-      style={{ height: TRACK_HEIGHT, width: widthPx }}
-    >
+    <div className="shrink-0" style={{ width: widthPx }}>
+      <div className="border-b border-border/40 bg-muted/30" style={{ height: TRACK_HEADER_HEIGHT }}>
+        <div className="sticky left-0 flex h-full w-fit max-w-[260px] items-center gap-1.5 px-1.5">
+          {track.kind === 'audio' ? <AudioLines aria-label="Audio track" className="h-3 w-3 shrink-0 text-muted-foreground" /> : <Film aria-label="Video track" className="h-3 w-3 shrink-0 text-muted-foreground" />}
+          <TrackNameLabel track={track} />
+          {sourceCaption ? <span className="truncate text-[10px] text-muted-foreground/70">{sourceCaption}</span> : null}
+        </div>
+      </div>
+      <div
+        ref={setNodeRef}
+        className="group/track relative border-b border-border/60 bg-background"
+        style={{ height: TRACK_HEIGHT, width: widthPx }}
+      >
       {/*
         First positioned child: paints and hit-tests BELOW later positioned
         siblings (the clip blocks), so a clip at startFrame 0 fully covers it
@@ -345,6 +390,7 @@ function TrackRow({ track, timelineClips, clips, zoom, widthPx, selectedTimeline
           );
         })}
       </SortableContext>
+      </div>
     </div>
   );
 }
@@ -385,6 +431,15 @@ export function Timeline(): React.JSX.Element {
   const selectTimelineClip = useStudioStore((s) => s.selectTimelineClip);
   const splitTimelineClip = useStudioStore((s) => s.splitTimelineClip);
   const duplicateTimelineClip = useStudioStore((s) => s.duplicateTimelineClip);
+
+  // Board-level droppable so a media drop onto an empty timeline (zero lanes)
+  // still yields a non-null `event.over` for the App-owned onDragEnd. The lanes
+  // nest inside it; rect-intersection prefers the smaller lane rect when the
+  // pointer is over one, so lane-precision is preserved.
+  const { setNodeRef: setBoardDropRef } = useDroppable({
+    id: 'timeline-board',
+    data: { kind: 'timeline-bg' } satisfies TimelineBoardDropData,
+  });
 
   const [isScrubbing, setIsScrubbing] = useState(false);
 
@@ -449,7 +504,7 @@ export function Timeline(): React.JSX.Element {
     return max;
   }, [timelineClips, clips]);
 
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const prevFullDurationRef = useRef(0);
   const [containerWidthPx, setContainerWidthPx] = useState(0);
 
@@ -466,7 +521,7 @@ export function Timeline(): React.JSX.Element {
   // (a playhead left over from clips since deleted must stay inside the
   // ruled/visible region, never render past it).
   const contentWidthPx = Math.max(durationWidthPx, containerWidthPx, playhead * zoom + tailFrames * zoom);
-  const tracksHeightPx = tracks.length * (TRACK_HEIGHT + TRACK_GAP);
+  const tracksHeightPx = tracks.length * (TRACK_HEIGHT + TRACK_HEADER_HEIGHT + TRACK_GAP);
 
   const selectedTc = selection.timelineClipId ? timelineClips[selection.timelineClipId] : undefined;
   const canSplit =
@@ -564,7 +619,7 @@ export function Timeline(): React.JSX.Element {
         </div>
       </div>
 
-      <div ref={scrollContainerRef} className="relative flex-1 overflow-auto">
+      <div ref={(el) => { scrollContainerRef.current = el; setBoardDropRef(el); }} className="relative flex-1 overflow-auto">
         <div className="relative" style={{ width: contentWidthPx }}>
           <Ruler widthPx={contentWidthPx} zoom={zoom} fps={fps} onScrub={handleScrub} />
 

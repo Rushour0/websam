@@ -21,6 +21,7 @@ vi.mock('../video/frame-source.js', () => ({
     height: 256,
     frameCount: 10,
     frameCountGuessed: true,
+    hasAudio: false,
   })),
 }));
 

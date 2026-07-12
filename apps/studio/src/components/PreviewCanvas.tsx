@@ -17,6 +17,13 @@
  * from the video's own clock while playing; conversely, scrubbing the
  * playhead elsewhere (e.g. `Timeline`) seeks this component's `<video>`.
  *
+ * Mute/volume are store-owned (`store.previewMuted`/`previewVolume`) so the
+ * overlay's speaker/volume controls govern ALL preview sound, including the
+ * timeline-audio elements in `AudioPlayback.tsx`, not just this `<video>`.
+ * While playing, this `<video>` is additionally force-muted whenever an
+ * `'audio'`-kind timeline track references the active clip (that track supplies
+ * the sound via `AudioPlayback.tsx`), so audio is never doubled.
+ *
  * Pointer handlers translate stage-local (= displayed-size) coordinates into
  * SOURCE-pixel coordinates and dispatch per `store.tool`:
  *  - `point-add` / `point-remove`: positive/negative point prompts, refining
@@ -225,6 +232,8 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
   const maskOpacity = useStudioStore((s) => s.maskOpacity);
   const selection = useStudioStore((s) => s.selection);
   const trackState = useStudioStore((s) => s.trackState);
+  const tracks = useStudioStore((s) => s.tracks);
+  const timelineClips = useStudioStore((s) => s.timelineClips);
   const addPromptObject = useStudioStore((s) => s.addPromptObject);
   const refineObject = useStudioStore((s) => s.refineObject);
 
@@ -236,16 +245,26 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
   // (non-no-op) seek — see the seek effect below for why this is needed.
   const forcedInitialSeekRef = useRef(false);
 
-  // Presentational, DOM-ref-adjacent state driving the offscreen <video>
-  // directly — NOT shared app state, so it stays local per the store contract's
-  // transient-state carve-out (studio-contracts.md §3). `muted` starts true to
-  // preserve today's silent/autoplay-safe behavior (the JSX `muted` attribute
-  // moved here so unmuting is possible).
-  const [volume, setVolume] = useState(1);
-  const [muted, setMuted] = useState(true);
+  // Mute/volume are shared app state now: the store owns `previewMuted`/
+  // `previewVolume` so AudioPlayback's timeline-audio elements obey the same
+  // user-facing controls (with the former local state, the only mute/volume UI
+  // silenced just this <video> and AudioPlayback would keep playing). See
+  // studio-contracts.md §3.
+  const volume = useStudioStore((s) => s.previewVolume);
+  const setVolume = useStudioStore((s) => s.setPreviewVolume);
+  const muted = useStudioStore((s) => s.previewMuted);
+  const setMuted = useStudioStore((s) => s.setPreviewMuted);
   // Level to restore when unmuting via the speaker button (so it returns to the
-  // pre-mute volume rather than jumping to full).
+  // pre-mute volume rather than jumping to full). Genuinely transient — stays
+  // local.
   const lastVolumeRef = useRef(1);
+
+  // An 'audio'-kind track referencing the active source clip owns its sound during playback
+  // (AudioPlayback.tsx) — force-mute this <video> then so audio is never doubled.
+  const audioTrackSuppliesSound = useMemo(
+    () => tracks.some((t) => t.kind === 'audio' && t.clipIds.some((id) => timelineClips[id]?.clipId === activeClipId)),
+    [tracks, timelineClips, activeClipId],
+  );
 
   // Prompt tools own click-to-add on the Stage; the overlay bar sits above the
   // Stage and its full-width Seek slider would otherwise intercept a prompt
@@ -343,14 +362,15 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
     else video.pause();
   }, [isPlaying, videoRef]);
 
-  // Drive the offscreen <video>'s volume/mute from local state (replaces the
-  // former hard `muted` JSX attribute).
+  // Drive the offscreen <video>'s volume/mute from the store's mute/volume.
+  // Additionally force-mute while playing whenever a timeline audio track
+  // supplies this clip's sound (AudioPlayback.tsx), so audio is never doubled.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     video.volume = volume;
-    video.muted = muted;
-  }, [volume, muted, videoRef]);
+    video.muted = muted || (isPlaying && audioTrackSuppliesSound);
+  }, [volume, muted, isPlaying, audioTrackSuppliesSound, videoRef]);
 
   // -------------------------------------------------------------------
   // requestVideoFrameCallback (rAF fallback) loop: video clock -> playhead,
@@ -766,16 +786,11 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
           <button
             type="button"
             aria-label={muted ? 'Unmute' : 'Mute'}
-            onClick={() =>
-              setMuted((m) => {
-                const next = !m;
-                if (!next && volume === 0) {
-                  // Unmuting from a zero level: restore the pre-mute volume.
-                  setVolume(lastVolumeRef.current > 0 ? lastVolumeRef.current : 1);
-                }
-                return next;
-              })
-            }
+            onClick={() => {
+              const next = !muted;
+              if (!next && volume === 0) setVolume(lastVolumeRef.current > 0 ? lastVolumeRef.current : 1);
+              setMuted(next);
+            }}
             className="flex h-7 w-7 items-center justify-center rounded-md text-white/80 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/80 focus-visible:ring-offset-1 focus-visible:ring-offset-neutral-950"
           >
             {muted || volume === 0 ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}

@@ -57,6 +57,13 @@ export interface ClipMeta {
   height: number;
   frameCount: number;
   frameCountGuessed: boolean;
+  /**
+   * Whether the source file carries at least one audio track. Populated by
+   * `probeClipMeta` at import; survives `session-manager`'s `attachSource`
+   * correction because that `set()` spreads `...clip`. Drives
+   * `addClipAsTracks`, which only creates a second (audio-kind) Track when true.
+   */
+  hasAudio: boolean;
 }
 
 export interface TimelineClip {
@@ -70,9 +77,13 @@ export interface TimelineClip {
   outFrame: number;
 }
 
+export type TrackKind = 'video' | 'audio';
+
 export interface Track {
   id: string;
   order: number;
+  kind: TrackKind;
+  name: string;
   clipIds: string[];
 }
 
@@ -122,6 +133,15 @@ export interface StudioState {
   playhead: number;
   isPlaying: boolean;
   zoom: number;
+  /**
+   * Hoisted preview-audio state (verifier fix: the "transient local state"
+   * carve-out no longer applies once `AudioPlayback` also needs mute/volume —
+   * otherwise the speaker button silently stops working exactly when an audio
+   * track supplies the sound). `previewMuted` starts `true` to preserve today's
+   * silent-by-default preview; `previewVolume` is `1`.
+   */
+  previewMuted: boolean;
+  previewVolume: number;
   /** Which side/bottom panels are shown — `App.tsx` drives its
    * `react-resizable-panels` collapse/expand from this; `Toolbar.tsx` renders
    * the show/hide toggle buttons (this component only reads/writes the
@@ -148,7 +168,9 @@ export interface StudioState {
   importClip: (file: File) => Promise<void>;
   removeClip: (clipId: string) => void;
 
-  addTrack: () => string;
+  addTrack: (kind?: TrackKind, name?: string) => string;
+  addClipAsTracks: (clipId: string, startFrame: number) => { videoTrackId: string; audioTrackId: string | null };
+  renameTrack: (trackId: string, name: string) => void;
   addTimelineClip: (clipId: string, trackId: string, startFrame: number) => string;
   moveTimelineClip: (timelineClipId: string, trackId: string, startFrame: number) => void;
   trimTimelineClip: (timelineClipId: string, inFrame: number, outFrame: number) => void;
@@ -161,6 +183,8 @@ export interface StudioState {
   setPlayhead: (frame: number) => void;
   setIsPlaying: (playing: boolean) => void;
   setZoom: (pxPerFrame: number) => void;
+  setPreviewMuted: (muted: boolean) => void;
+  setPreviewVolume: (volume: number) => void;
 
   togglePanel: (key: keyof PanelVisibility) => void;
   setPanelVisible: (key: keyof PanelVisibility, visible: boolean) => void;
@@ -256,6 +280,8 @@ export const useStudioStore = create<StudioState>()(
     selection: { timelineClipId: null, objectId: null },
     playhead: 0,
     isPlaying: false,
+    previewMuted: true,
+    previewVolume: 1,
     zoom: 4,
     panels: { media: true, properties: true, chat: true, timeline: true },
 
@@ -290,6 +316,7 @@ export const useStudioStore = create<StudioState>()(
         height: probed.height,
         frameCount: probed.frameCount,
         frameCountGuessed: probed.frameCountGuessed,
+        hasAudio: probed.hasAudio,
       };
       set((state) => ({ clips: { ...state.clips, [id]: clip } }));
     },
@@ -339,10 +366,42 @@ export const useStudioStore = create<StudioState>()(
       });
     },
 
-    addTrack: () => {
+    addTrack: (kind = 'video', name) => {
       const id = genId();
-      set((state) => ({ tracks: [...state.tracks, { id, order: state.tracks.length, clipIds: [] }] }));
+      set((state) => ({ tracks: [...state.tracks, { id, order: state.tracks.length, kind, name: name ?? `Track ${state.tracks.length + 1}`, clipIds: [] }] }));
       return id;
+    },
+
+    // Places a source clip on a brand-new video Track (and, iff the source
+    // `hasAudio`, an adjacent brand-new audio Track — `audio.order ===
+    // video.order + 1`) as two INDEPENDENT TimelineClips (each its own genId,
+    // inFrame 0 / outFrame frameCount-1) referencing the same clipId. Composes
+    // the existing addTrack/addTimelineClip; the per-track
+    // findNonOverlappingStart is identity on the empty new tracks but preserves
+    // the overlap-avoidance contract (and clamps negative startFrame to 0).
+    // No-op returning empty ids on unknown clipId.
+    addClipAsTracks: (clipId, startFrame) => {
+      const clip = get().clips[clipId];
+      if (!clip) return { videoTrackId: '', audioTrackId: null }; // unknown clip: mutate nothing
+      const durationFrames = Math.max(1, clip.frameCount);
+      const videoTrackId = get().addTrack('video', `Video — ${clip.fileName}`);
+      get().addTimelineClip(clipId, videoTrackId, findNonOverlappingStart(get().timelineClips, videoTrackId, startFrame, durationFrames));
+      let audioTrackId: string | null = null;
+      if (clip.hasAudio) {
+        audioTrackId = get().addTrack('audio', `Audio — ${clip.fileName}`);
+        get().addTimelineClip(clipId, audioTrackId, findNonOverlappingStart(get().timelineClips, audioTrackId, startFrame, durationFrames));
+      }
+      return { videoTrackId, audioTrackId };
+    },
+
+    // Renames a track. Empty/whitespace-only names are a no-op (the inline
+    // rename UI can blur with an empty field); the stored name is trimmed.
+    renameTrack: (trackId, name) => {
+      const trimmed = name.trim();
+      if (!trimmed) return; // empty/whitespace rename is a no-op
+      set((state) => (state.tracks.some((t) => t.id === trackId)
+        ? { tracks: state.tracks.map((t) => (t.id === trackId ? { ...t, name: trimmed } : t)) }
+        : {}));
     },
 
     addTimelineClip: (clipId: string, trackId: string, startFrame: number) => {
@@ -553,6 +612,8 @@ export const useStudioStore = create<StudioState>()(
     setPlayhead: (frame: number) => set({ playhead: Math.max(0, frame) }),
     setIsPlaying: (playing: boolean) => set({ isPlaying: playing }),
     setZoom: (pxPerFrame: number) => set({ zoom: Math.max(0.01, pxPerFrame) }),
+    setPreviewMuted: (muted) => set({ previewMuted: muted }),
+    setPreviewVolume: (volume) => set({ previewVolume: Math.min(1, Math.max(0, volume)) }),
 
     togglePanel: (key) => set((state) => ({ panels: { ...state.panels, [key]: !state.panels[key] } })),
     setPanelVisible: (key, visible) => set((state) => ({ panels: { ...state.panels, [key]: visible } })),

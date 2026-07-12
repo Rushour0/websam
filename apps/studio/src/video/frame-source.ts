@@ -3,7 +3,14 @@
  * (studio-contracts.md §4.4). The worker's mp4box+WebCodecs pipeline inside
  * `@websam3/core` stays the source of truth for segmentation-relevant
  * decoding — nothing here touches a `VideoSession`.
+ *
+ * `probeClipMeta` additionally reports container-level audio presence
+ * (`ClipProbe.hasAudio`) via a mediabunny header parse (see `probeHasAudio`),
+ * raced against the same `PROBE_TIMEOUT_MS` ceiling that bounds the `<video>`
+ * metadata read so import can never hang.
  */
+
+import { ALL_FORMATS, BlobSource, Input } from 'mediabunny';
 
 /** What `probeClipMeta` resolves with — feeds `ClipMeta`'s sizing fields directly. */
 export interface ClipProbe {
@@ -16,6 +23,11 @@ export interface ClipProbe {
   frameCount: number;
   /** Always `true` — corrected once `attachSource()` returns the real count/fps. */
   frameCountGuessed: boolean;
+  /**
+   * True iff the container demuxes with at least one audio track (mediabunny
+   * header parse; false on any parse failure or timeout).
+   */
+  hasAudio: boolean;
 }
 
 /**
@@ -43,7 +55,7 @@ const PROBE_TIMEOUT_MS = 7000;
  */
 const FALLBACK_DIM = 0;
 
-function fallbackProbe(): ClipProbe {
+function fallbackProbe(): Omit<ClipProbe, 'hasAudio'> {
   return {
     durationSec: 0,
     fps: DEFAULT_FPS_ESTIMATE,
@@ -65,11 +77,15 @@ function fallbackProbe(): ClipProbe {
  * browsers `loadedmetadata` (or a genuine `error`) fires almost immediately
  * and wins the race, so the happy path is unchanged. If neither event fires
  * in time (the flake this guards against), resolves with a best-effort
- * sentinel `ClipProbe` instead of hanging forever — `importClip` always
+ * sentinel probe instead of hanging forever — `importClip` always
  * completes, and downstream `attachSource` still corrects the guessed
  * fields once the model loads.
+ *
+ * Resolves the sizing fields only (`Omit<ClipProbe, 'hasAudio'>`); audio
+ * presence is probed separately (`probeHasAudio`) and merged by the public
+ * `probeClipMeta` entry point.
  */
-export function probeClipMeta(file: File | Blob): Promise<ClipProbe> {
+function probeVideoElement(file: File | Blob): Promise<Omit<ClipProbe, 'hasAudio'>> {
   return new Promise((resolve) => {
     const video = document.createElement('video');
     video.preload = 'metadata';
@@ -83,7 +99,7 @@ export function probeClipMeta(file: File | Blob): Promise<ClipProbe> {
       clearTimeout(timeoutId);
       URL.revokeObjectURL(url);
     };
-    const settle = (probe: ClipProbe) => {
+    const settle = (probe: Omit<ClipProbe, 'hasAudio'>) => {
       if (settled) return;
       settled = true;
       cleanup();
@@ -115,6 +131,53 @@ export function probeClipMeta(file: File | Blob): Promise<ClipProbe> {
     video.src = url;
     video.load();
   });
+}
+
+/**
+ * Detect container-level audio presence by demuxing the file header with
+ * mediabunny — chosen over `<video>`-element heuristics because the reliable
+ * signals aren't available at metadata time in Chromium:
+ * `HTMLMediaElement.audioTracks` sits behind the Experimental Web Platform
+ * Features flag, and `webkitAudioDecodedByteCount` reads `0` until real decode
+ * progress — both give false negatives when we probe. mediabunny@1.50.8 is
+ * already a dependency and `BlobSource` does lazy, header-only random-access
+ * reads (no decode), so this is a cheap, accurate container introspection.
+ *
+ * @returns `true` iff the container exposes at least one audio track; `false`
+ * on any parse failure (unreadable/unknown container -> treat as video-only).
+ */
+export async function probeHasAudio(file: File | Blob): Promise<boolean> {
+  const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
+  try {
+    return (await input.getPrimaryAudioTrack()) !== null;
+  } catch {
+    return false; // unreadable/unknown container -> treat as video-only
+  } finally {
+    input.dispose();
+  }
+}
+
+/**
+ * Public probe entry point used at `importClip` time: resolves the `<video>`
+ * sizing fields together with container-level `hasAudio`.
+ *
+ * The audio probe is raced against the same `PROBE_TIMEOUT_MS` ceiling that
+ * bounds the `<video>` metadata read — an unbounded `probeHasAudio` would
+ * reintroduce the exact "import hangs forever" flake `PROBE_TIMEOUT_MS` exists
+ * to prevent. `probeHasAudio`'s own `input.dispose()` runs in its `finally`,
+ * so a probe that loses the race still frees its reader when it eventually
+ * settles. A timed-out audio probe reports `false` (video-only), matching the
+ * conservative fallback used everywhere else in this file.
+ */
+export async function probeClipMeta(file: File | Blob): Promise<ClipProbe> {
+  const [base, hasAudio] = await Promise.all([
+    probeVideoElement(file),
+    Promise.race([
+      probeHasAudio(file),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), PROBE_TIMEOUT_MS)),
+    ]),
+  ]);
+  return { ...base, hasAudio };
 }
 
 /** Project frame index -> playback time in seconds. */

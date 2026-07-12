@@ -169,6 +169,7 @@ describe('studio segmentation seam (real src/segmentation/* vs HF EdgeTamVideoMo
         height: meta.clip.height,
         frameCount: meta.clip.numFrames,
         frameCountGuessed: true,
+        hasAudio: false,
       };
       const { get, set, state } = makeFakeStudioState(clip);
 

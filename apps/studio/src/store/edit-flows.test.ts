@@ -2,9 +2,12 @@
  * Studio store unit tests for realistic TIMELINE-EDIT flows: import -> place
  * on a track -> trim -> move/reorder -> multi-clip geometry, plus the
  * drag/delete/remix primitives (removeTrack, splitTimelineClip,
- * duplicateTimelineClip). Pure-node, no browser, no segmenter — same mocking
- * pattern as `studio-store.test.ts` (studio-contracts.md §6.2). The async
- * segmentation actions themselves are exercised end-to-end by
+ * duplicateTimelineClip) and the track-authoring actions (addClipAsTracks,
+ * renameTrack). Pure-node, no browser, no segmenter — same mocking pattern as
+ * `studio-store.test.ts` (studio-contracts.md §6.2). The `probeClipMeta` mock
+ * is filename-driven for audio-presence (a name containing 'with-audio' probes
+ * hasAudio=true) so a single fixture chooses whether a source has an audio
+ * track. The async segmentation actions themselves are exercised end-to-end by
  * `../e2e/edit-flows.browser.test.ts`, not here.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -17,7 +20,10 @@ vi.mock('../video/frame-source.js', () => ({
     height: 256,
     frameCount: 10,
     frameCountGuessed: true,
-    // `file` unused but kept to mirror the real probe's signature.
+    // Filename-driven so tests choose audio-presence per file: only a name
+    // containing 'with-audio' probes as hasAudio=true (every 'clip.mp4' test
+    // stays hasAudio=false with zero edits).
+    hasAudio: file.name.includes('with-audio'),
   })),
 }));
 
@@ -64,6 +70,13 @@ async function importAndTrack(fileName = 'clip.mp4'): Promise<{ clipId: string; 
   )!;
   const trackId = useStudioStore.getState().addTrack();
   return { clipId, trackId };
+}
+
+// addClipAsTracks tests must NOT pre-create a track (the action creates its
+// own), so importAndTrack is wrong for them — import only, then resolve the id.
+async function importClip(fileName: string): Promise<string> {
+  await useStudioStore.getState().importClip(makeFile(fileName));
+  return Object.keys(useStudioStore.getState().clips).find((id) => useStudioStore.getState().clips[id]!.fileName === fileName)!;
 }
 
 describe('edit-flows (unit): trim geometry', () => {
@@ -402,5 +415,118 @@ describe('edit-flows (unit): duplicateTimelineClip', () => {
     const after = useStudioStore.getState();
     expect(Object.keys(after.timelineClips)).toEqual(clipKeysBefore);
     expect(after.tracks).toEqual(tracksBefore);
+  });
+});
+
+describe('edit-flows (unit): addClipAsTracks', () => {
+  beforeEach(resetStore);
+
+  it('creates exactly one video track when the source has no audio', async () => {
+    const clipId = await importClip('clip.mp4');
+    const { videoTrackId, audioTrackId } = useStudioStore.getState().addClipAsTracks(clipId, 5);
+    expect(audioTrackId).toBeNull();
+
+    const state = useStudioStore.getState();
+    expect(state.tracks).toHaveLength(1);
+    const track = state.tracks[0]!;
+    expect(track).toMatchObject({ id: videoTrackId, kind: 'video', name: 'Video — clip.mp4' });
+    expect(track.clipIds).toHaveLength(1);
+
+    // frameCount 10 -> fresh full-source range [0, 9] at the requested start.
+    expect(state.timelineClips[track.clipIds[0]!]).toMatchObject({
+      clipId,
+      trackId: videoTrackId,
+      startFrame: 5,
+      inFrame: 0,
+      outFrame: 9,
+    });
+  });
+
+  it('creates a video track plus an audio track with its OWN TimelineClip when the source has audio', async () => {
+    const clipId = await importClip('clip-with-audio.mp4');
+    expect(useStudioStore.getState().clips[clipId]).toMatchObject({ hasAudio: true });
+
+    const { videoTrackId, audioTrackId } = useStudioStore.getState().addClipAsTracks(clipId, 0);
+    expect(typeof audioTrackId).toBe('string');
+    expect(audioTrackId).not.toBeNull();
+    expect(audioTrackId).not.toBe(videoTrackId);
+
+    const state = useStudioStore.getState();
+    expect(state.tracks).toHaveLength(2);
+    // Video appended first (pinned) -> [video, audio] at orders [0, 1].
+    expect(state.tracks.map((t) => t.kind)).toEqual(['video', 'audio']);
+    expect(state.tracks.map((t) => t.order)).toEqual([0, 1]);
+
+    const videoTrack = state.tracks.find((t) => t.id === videoTrackId)!;
+    const audioTrack = state.tracks.find((t) => t.id === audioTrackId)!;
+    expect(videoTrack.name).toBe('Video — clip-with-audio.mp4');
+    expect(audioTrack.name).toBe('Audio — clip-with-audio.mp4');
+
+    expect(videoTrack.clipIds).toHaveLength(1);
+    expect(audioTrack.clipIds).toHaveLength(1);
+    const vTc = videoTrack.clipIds[0]!;
+    const aTc = audioTrack.clipIds[0]!;
+    expect(vTc).not.toBe(aTc);
+
+    expect(state.timelineClips[vTc]).toMatchObject({ clipId, trackId: videoTrackId, startFrame: 0, inFrame: 0, outFrame: 9 });
+    expect(state.timelineClips[aTc]).toMatchObject({ clipId, trackId: audioTrackId, startFrame: 0, inFrame: 0, outFrame: 9 });
+  });
+
+  it('audio and video TimelineClips trim and move independently', async () => {
+    const clipId = await importClip('clip-with-audio.mp4');
+    const { videoTrackId, audioTrackId } = useStudioStore.getState().addClipAsTracks(clipId, 0);
+
+    const before = useStudioStore.getState();
+    const vTc = before.tracks.find((t) => t.id === videoTrackId)!.clipIds[0]!;
+    const aTc = before.tracks.find((t) => t.id === audioTrackId)!.clipIds[0]!;
+
+    // Trimming the audio clip leaves the video clip's range untouched.
+    useStudioStore.getState().trimTimelineClip(aTc, 2, 6);
+    let state = useStudioStore.getState();
+    expect(state.timelineClips[aTc]).toMatchObject({ inFrame: 2, outFrame: 6 });
+    expect(state.timelineClips[vTc]).toMatchObject({ inFrame: 0, outFrame: 9 });
+
+    // Moving the video clip leaves the audio clip's placement untouched.
+    useStudioStore.getState().moveTimelineClip(vTc, videoTrackId, 50);
+    state = useStudioStore.getState();
+    expect(state.timelineClips[vTc]).toMatchObject({ startFrame: 50 });
+    expect(state.timelineClips[aTc]).toMatchObject({ startFrame: 0 });
+  });
+
+  it('appends new tracks after existing ones', async () => {
+    useStudioStore.getState().addTrack();
+    const clipId = await importClip('clip-with-audio.mp4');
+    const { videoTrackId, audioTrackId } = useStudioStore.getState().addClipAsTracks(clipId, 0);
+
+    const state = useStudioStore.getState();
+    expect(state.tracks).toHaveLength(3);
+    expect(state.tracks.map((t) => t.order)).toEqual([0, 1, 2]);
+    expect(state.tracks[1]!.id).toBe(videoTrackId);
+    expect(state.tracks[2]!.id).toBe(audioTrackId);
+  });
+
+  it('mutates nothing and returns empty ids for an unknown clipId', () => {
+    const result = useStudioStore.getState().addClipAsTracks('nope', 0);
+    expect(result).toEqual({ videoTrackId: '', audioTrackId: null });
+    expect(useStudioStore.getState().tracks).toHaveLength(0);
+  });
+});
+
+describe('edit-flows (unit): renameTrack', () => {
+  beforeEach(resetStore);
+
+  it('renames a track (trimmed) without touching kind/order/clipIds, and addTrack defaults to video/Track N', () => {
+    const id = useStudioStore.getState().addTrack();
+    expect(useStudioStore.getState().tracks[0]).toMatchObject({ kind: 'video', name: 'Track 1', order: 0, clipIds: [] });
+
+    useStudioStore.getState().renameTrack(id, '  My Track  ');
+    expect(useStudioStore.getState().tracks[0]).toMatchObject({ name: 'My Track', kind: 'video', order: 0, clipIds: [] });
+  });
+
+  it('is a no-op for an unknown id and for a whitespace-only name', () => {
+    const id = useStudioStore.getState().addTrack('audio', 'A');
+    useStudioStore.getState().renameTrack('nope', 'X');
+    useStudioStore.getState().renameTrack(id, '   ');
+    expect(useStudioStore.getState().tracks[0]).toMatchObject({ kind: 'audio', name: 'A' });
   });
 });

@@ -7,8 +7,12 @@
  * `src/segmentation/session-manager.ts` (passed as props, not store state,
  * per §3's `PreviewCanvas` contract), and owns the single shared
  * `<DndContext>` for MediaLibrary→Timeline drops and intra-Timeline
- * reorder/move (§3's DnD-ownership note). Also renders a small global error
- * boundary + `notice` toast for the store's `notice` field.
+ * reorder/move (§3's DnD-ownership note); media-library drops now call
+ * `addClipAsTracks` (auto-splitting into video + audio tracks, landing on
+ * either a lane or the timeline board droppable) instead of a single
+ * add-track/add-clip pair, and App mounts the store-driven `AudioPlayback`
+ * engine. Also renders a small global error boundary + `notice` toast for the
+ * store's `notice` field.
  */
 import { Component, useCallback, useEffect, useRef } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
@@ -25,6 +29,7 @@ import { PreviewCanvas } from './components/PreviewCanvas.js';
 import { PropertiesPanel } from './components/PropertiesPanel.js';
 import { ChatPanel } from './components/ChatPanel.js';
 import { Timeline } from './components/Timeline.js';
+import { AudioPlayback } from './components/AudioPlayback.js';
 import { disposeAllClips } from './segmentation/session-manager.js';
 import { disposeSegmenter } from './segmentation/segmenter-lifecycle.js';
 
@@ -40,23 +45,23 @@ type DragData =
   | { kind: 'timeline-clip'; timelineClipId: string; trackId: string };
 
 /**
- * Shape stashed on a droppable's `data.current` by `Timeline` (one per track
- * lane) — matches `Timeline.tsx`'s exported `TimelineTrackDropData`
- * verbatim. It carries only `trackId`, not a drop-point frame — `Timeline`'s
- * droppable is the whole lane, not a positioned drop target, so `onDragEnd`
- * derives `startFrame` itself (see `handleDragEnd` below).
+ * Shape stashed on a droppable's `data.current` by `Timeline` — matches
+ * `Timeline.tsx`'s exported drop-data shapes verbatim. A `'track'` droppable
+ * (one per track lane) carries only `trackId`, not a drop-point frame; the
+ * `'timeline-bg'` droppable is the whole timeline board (covers the empty
+ * state and the gaps below the lanes). `Timeline`'s droppables are areas, not
+ * positioned drop targets, so `onDragEnd` derives `startFrame` itself (see
+ * `handleDragEnd` below).
  */
-interface DropData {
-  kind: 'track';
-  trackId: string;
-}
+type DropData = { kind: 'track'; trackId: string } | { kind: 'timeline-bg' };
 
 function isDragData(value: unknown): value is DragData {
   return typeof value === 'object' && value !== null && 'kind' in value;
 }
 
 function isDropData(value: unknown): value is DropData {
-  return typeof value === 'object' && value !== null && (value as { kind?: unknown }).kind === 'track';
+  const kind = (value as { kind?: unknown } | null)?.kind;
+  return typeof value === 'object' && value !== null && (kind === 'track' || kind === 'timeline-bg');
 }
 
 /**
@@ -195,12 +200,11 @@ export function App(): JSX.Element {
     verticalGroupRef.current?.setLayout(computeLayout(VERTICAL_WEIGHTS, { main: true, timeline: panels.timeline }));
   }, [panels.media, panels.properties, panels.chat, panels.timeline]);
 
-  const addTimelineClip = useStudioStore((s) => s.addTimelineClip);
+  const addClipAsTracks = useStudioStore((s) => s.addClipAsTracks);
   const moveTimelineClip = useStudioStore((s) => s.moveTimelineClip);
   const addTrack = useStudioStore((s) => s.addTrack);
   const tracks = useStudioStore((s) => s.tracks);
   const timelineClips = useStudioStore((s) => s.timelineClips);
-  const clips = useStudioStore((s) => s.clips);
   const zoom = useStudioStore((s) => s.zoom);
 
   // Bug #3: without an activation constraint, a plain click on a
@@ -215,46 +219,33 @@ export function App(): JSX.Element {
       const over = event.over?.data.current;
       if (!isDragData(active) || !isDropData(over)) return;
 
-      // MediaLibrary/Timeline drop targets are whole track lanes, not a
-      // positioned drop point (`Timeline.tsx`'s `TimelineTrackDropData`
-      // carries only `trackId`) — a track has never been created yet on an
-      // empty board, so fall back to creating one so the drop still lands.
-      const trackId = tracks.some((t) => t.id === over.trackId) ? over.trackId : addTrack();
-
       if (active.kind === 'media-library-clip') {
-        // No drop-point frame is available — append the new clip after the
-        // last clip currently on the target track (falls back to frame 0 for
-        // an empty track), then clamp against overlap (bug #2) in case the
-        // track was created above and `timelineClips` doesn't reflect it yet.
-        const sourceClip = clips[active.clipId];
-        const durationFrames = sourceClip ? Math.max(1, sourceClip.frameCount) : 1;
-        const trackClips = Object.values(timelineClips).filter((tc) => tc.trackId === trackId);
-        const desiredStart = trackClips.reduce(
-          (end, tc) => Math.max(end, tc.startFrame + (tc.outFrame - tc.inFrame + 1)),
-          0,
-        );
-        const startFrame = findNonOverlappingStart(timelineClips, trackId, desiredStart, durationFrames);
-        addTimelineClip(active.clipId, trackId, startFrame);
+        // Media drops ALWAYS create fresh track(s): a video track plus, when
+        // clips[clipId].hasAudio, an audio track — each with its own TimelineClip.
+        // Works from any drop target ('track' lane or the 'timeline-bg' board, which
+        // covers the empty state). startFrame 0 needs no overlap pass here: the new
+        // tracks start empty and addClipAsTracks runs the store's own
+        // findNonOverlappingStart per created track. Known consequence: dropping onto
+        // an EXISTING lane no longer appends to it (intended behavior change).
+        addClipAsTracks(active.clipId, 0);
       } else if (active.kind === 'timeline-clip') {
-        // Derive the new position from the pointer delta Timeline's own
-        // zoom-aware layout uses (`px-per-frame`), applied to the clip's
-        // pre-drag `startFrame`, then clamp against overlap with the other
-        // clips already on the destination track (bug #2).
         const existing = timelineClips[active.timelineClipId];
+        if (!existing) return;
+        // Lane drop: use it (with the stale-lane addTrack() fallback, which still
+        // matters for intra-timeline moves). Board-background drop: treat as a
+        // same-track horizontal move.
+        const trackId =
+          over.kind === 'track'
+            ? (tracks.some((t) => t.id === over.trackId) ? over.trackId : addTrack())
+            : existing.trackId;
         const deltaFrames = zoom > 0 ? Math.round(event.delta.x / zoom) : 0;
-        const desiredStart = Math.max(0, (existing?.startFrame ?? 0) + deltaFrames);
-        const durationFrames = existing ? existing.outFrame - existing.inFrame + 1 : 1;
-        const startFrame = findNonOverlappingStart(
-          timelineClips,
-          trackId,
-          desiredStart,
-          durationFrames,
-          active.timelineClipId,
-        );
+        const desiredStart = Math.max(0, existing.startFrame + deltaFrames);
+        const durationFrames = existing.outFrame - existing.inFrame + 1;
+        const startFrame = findNonOverlappingStart(timelineClips, trackId, desiredStart, durationFrames, active.timelineClipId);
         moveTimelineClip(active.timelineClipId, trackId, startFrame);
       }
     },
-    [tracks, timelineClips, clips, zoom, addTrack, addTimelineClip, moveTimelineClip],
+    [tracks, timelineClips, zoom, addTrack, addClipAsTracks, moveTimelineClip],
   );
 
   useEffect(() => {
@@ -303,6 +294,7 @@ export function App(): JSX.Element {
             </PanelGroup>
           </div>
         </DndContext>
+        <AudioPlayback />
         <NoticeToast />
       </div>
     </ErrorBoundary>
