@@ -10,6 +10,11 @@ dependencies = [
     "pillow>=12.3.0,<13",
     "imageio>=2.37.0,<3",
     "imageio-ffmpeg>=0.6.0,<1",
+    # vid_ground_text's real (non-stub) path: Gemini vision call for
+    # text->box/point grounding. Same provider as the fabri agent's own
+    # LLM (GEMINI_API_KEY), so one key covers both roles. Not needed to
+    # run the test suite (WEBSAM_GROUND_TEXT_STUB covers that offline).
+    "google-genai>=1.0.0,<2",
 ]
 
 [dependency-groups]

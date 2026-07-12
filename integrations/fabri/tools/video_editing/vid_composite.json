@@ -1,0 +1,24 @@
+{
+  "name": "vid_composite",
+  "description": "Composite a video with a per-frame object mask: cut the object out, highlight it, or swap its background. args: {video, masksDir?: string, rleJson?: string, mode: 'cutout'|'highlight'|'background', color?: [r,g,b]} (video sandbox-relative; exactly one of masksDir [a directory of frame-%04d.png mask PNGs, white=object] or rleJson [a JSON file: either one COCO-RLE dict applied to every frame, or a list of one COCO-RLE dict per frame, same shape as vid_track's masks.rle.json]; mode='cutout' fills everything outside the mask with black, 'highlight' blends color over the masked object leaving the rest of the frame untouched, 'background' fills everything outside the mask with color [default green]). Returns {outputPath, warning?}.",
+  "command": ["python3", "vid_composite.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "video": {"type": "string"},
+      "masksDir": {"type": "string"},
+      "rleJson": {"type": "string"},
+      "mode": {"type": "string", "enum": ["cutout", "highlight", "background"]},
+      "color": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}
+    },
+    "required": ["video", "mode"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "outputPath": {"type": "string"},
+      "warning": {"type": "string"}
+    }
+  },
+  "timeout_s": 60
+}

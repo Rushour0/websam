@@ -1,0 +1,24 @@
+{
+  "name": "vid_extract_frame",
+  "description": "Extract one video frame as a PNG. args: {video (sandbox-relative path), timeSec?: number, frameIndex?: integer} (exactly one of timeSec/frameIndex; timeSec is rounded to the nearest decoded frame using the video's fps). Returns {framePath, width, height, frameIndex}. Use this before vid_ground_text or vid_segment — they need a still image, not a video.",
+  "command": ["python3", "vid_extract_frame.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "video": {"type": "string"},
+      "timeSec": {"type": "number"},
+      "frameIndex": {"type": "integer"}
+    },
+    "required": ["video"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "framePath": {"type": "string"},
+      "width": {"type": "integer"},
+      "height": {"type": "integer"},
+      "frameIndex": {"type": "integer"}
+    }
+  },
+  "timeout_s": 20
+}

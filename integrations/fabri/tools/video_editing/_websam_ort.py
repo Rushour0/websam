@@ -68,8 +68,9 @@ from PIL import Image
 
 
 def _repo_root() -> pathlib.Path:
-    # integrations/fabri/tools/video_editing/_websam_ort.py -> repo root is 3 parents up
-    return pathlib.Path(__file__).resolve().parents[3]
+    # integrations/fabri/tools/video_editing/_websam_ort.py -> repo root is 4 parents up
+    # (video_editing -> tools -> fabri -> integrations -> <repo root>).
+    return pathlib.Path(__file__).resolve().parents[4]
 
 
 MODELS_DIR_DEFAULT = _repo_root() / "tools" / "goldens" / "models-cache" / "edgetam"

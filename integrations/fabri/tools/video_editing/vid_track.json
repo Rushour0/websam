@@ -1,0 +1,31 @@
+{
+  "name": "vid_track",
+  "description": "Track an object across a whole video, starting from a prompt on one frame. args: {videoPath, promptFrameSec, point?: {x,y}, box?: {x0,y0,x1,y1}} (exactly one of point/box, original pixel coords at the prompt frame). Returns immediately with {jobId, status:'running'} — the job runs in the background; call vid_poll_job with the jobId to check progress and get the final result. Do not call vid_track again for the same object; poll instead.",
+  "command": ["python3", "vid_track.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "videoPath": {"type": "string"},
+      "promptFrameSec": {"type": "number"},
+      "point": {
+        "type": "object",
+        "properties": {
+          "x": {"type": "number"},
+          "y": {"type": "number"}
+        }
+      },
+      "box": {
+        "type": "object",
+        "properties": {
+          "x0": {"type": "number"},
+          "y0": {"type": "number"},
+          "x1": {"type": "number"},
+          "y1": {"type": "number"}
+        }
+      }
+    },
+    "required": ["videoPath", "promptFrameSec"]
+  },
+  "output_schema": {"type": "object"},
+  "timeout_s": 15
+}

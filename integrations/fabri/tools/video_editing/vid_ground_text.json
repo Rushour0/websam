@@ -1,0 +1,15 @@
+{
+  "name": "vid_ground_text",
+  "description": "Locate an object described in plain English within a single video frame image. args: {frame, phrase} where frame is a sandbox-relative path to a PNG/JPEG frame (e.g. from vid_extract_frame) and phrase is a short description of the object (e.g. 'the red car'). Returns {boxes: [[x1,y1,x2,y2], ...], points: [{x,y,label}], chosen: {box:[x1,y1,x2,y2]} or {point:{x,y,label}}} — all coordinates are in the ORIGINAL pixel space of that frame image, top-left origin. 'chosen' is the single best candidate to hand to vid_segment/vid_track; boxes/points are the full candidate set, often just one entry. Call this to turn a text description into a prompt for vid_segment/vid_track — never guess coordinates yourself. Requires a configured vision LLM; if unavailable the tool returns a tool_error.",
+  "command": ["python3", "vid_ground_text.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "frame": {"type": "string"},
+      "phrase": {"type": "string"}
+    },
+    "required": ["frame", "phrase"]
+  },
+  "output_schema": {"type": "object"},
+  "timeout_s": 30
+}

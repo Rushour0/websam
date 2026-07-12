@@ -1,0 +1,52 @@
+{
+  "name": "vid_segment",
+  "description": "Segment a single video frame given a point or box prompt. Select the source frame with EITHER {video, frameIndex} (video: sandbox-relative video path; frameIndex: 0-based frame index) OR {frame} (sandbox-relative PNG path) — exactly one of the two. Also pass {prompt}: one of {point: {x, y, label?}}, {points: [{x, y, label}]}, or {box: {x0, y0, x1, y1}}, all in the frame's ORIGINAL pixel coordinates. Returns {maskPath, area, width, height} where maskPath is a sandbox-relative PNG (white=object, 0/255) and area is the object's pixel count. Use for a one-off still-frame cutout; use vid_track to follow an object across the whole video.",
+  "command": ["python3", "vid_segment.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "video": {"type": "string"},
+      "frameIndex": {"type": "integer"},
+      "frame": {"type": "string"},
+      "prompt": {
+        "type": "object",
+        "properties": {
+          "point": {
+            "type": "object",
+            "properties": {
+              "x": {"type": "number"},
+              "y": {"type": "number"},
+              "label": {"type": "integer"}
+            },
+            "required": ["x", "y"]
+          },
+          "points": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "x": {"type": "number"},
+                "y": {"type": "number"},
+                "label": {"type": "integer"}
+              },
+              "required": ["x", "y", "label"]
+            }
+          },
+          "box": {
+            "type": "object",
+            "properties": {
+              "x0": {"type": "number"},
+              "y0": {"type": "number"},
+              "x1": {"type": "number"},
+              "y1": {"type": "number"}
+            },
+            "required": ["x0", "y0", "x1", "y1"]
+          }
+        }
+      }
+    },
+    "required": ["prompt"]
+  },
+  "output_schema": {"type": "object"},
+  "timeout_s": 30
+}

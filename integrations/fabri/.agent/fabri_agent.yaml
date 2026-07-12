@@ -1,0 +1,157 @@
+# websam-video -- single-domain fabri agent for video segmentation/editing.
+#
+# Topology: ONE domain (video_editing), so there is no spawn_subagent
+# fan-out like ludexel-gba's per-content-domain children (that project has
+# 11 domains with real cross-file dependencies; this one has 9 tools that
+# already encode their own call order via description text). `fabri run`
+# is launched with --system-prompt-file .agent/prompts/orchestrator.md,
+# which inlines domains/video_editing.md by reference (kept as a separate
+# file only so a future multi-domain video agent -- e.g. an audio_editing
+# domain alongside this one -- can reuse the split without a rewrite).
+#
+# Service wiring (mirrors ludexel-gba): sandbox_root is "project" --
+# relative to the per-run materialized work dir the service cd's into
+# before exec'ing fabri; every vid_* script independently re-checks
+# $FABRI_SANDBOX_ROOT (see docs/fabri-contracts.md §0/§3).
+
+agent:
+  name: websam-video
+
+  # extract -> ground -> segment/track (submit+poll) -> export/composite is
+  # a 5-7 step happy path. vid_track's submit->poll pattern alone can burn
+  # several steps if the job runs long (poll, poll, poll...), so 30 gives
+  # real headroom for a poll loop plus a retry/refine pass (re-ground a
+  # missed object, re-segment with a corrected point) without inviting
+  # runaway iteration. Compare ludexel-gba's 48, which has to cover a 6-7
+  # child fan-out PLUS a repair ladder -- this agent has neither.
+  max_steps: 30
+
+  # Hard COGS backstop: if a run's cost hits this before a final answer,
+  # fabri halts with outcome=budget_exceeded rather than spinning on the
+  # step budget. No sub-agents here, so this is the agent's ENTIRE budget
+  # (not split with a subagent.max_cost_usd the way ludexel-gba's is).
+  # Sized well above a normal happy-path run (a handful of Gemini calls +
+  # local ORT inference, which is free/CPU-bound and doesn't hit this cap
+  # at all -- only the LLM turns do).
+  max_cost_usd: 2.0
+
+  # No spawn_subagent fan-out in this agent (single domain), so there is
+  # no subagent budget block to set -- included here, commented, only to
+  # flag the deliberate omission for anyone diffing this against
+  # ludexel-gba's fabri_agent.yaml.
+  # subagent:
+  #   max_steps: null
+  #   max_cost_usd: null
+
+  # Typed final answer (O1): the agent's last message is parsed as JSON and
+  # validated against this schema instead of freeform text, so a calling
+  # service can read `outputPath` programmatically without scraping prose.
+  response_schema:
+    type: object
+    required: [outputPath]
+    properties:
+      outputPath:
+        type: string
+        description: Sandbox-relative path to the final deliverable (a matte zip, cutout mp4, composited/trimmed/concatenated video, etc).
+      masks:
+        type: array
+        items: {type: string}
+        description: Sandbox-relative paths to any mask artifacts produced along the way (mask PNGs, an RLE json, a masks dir) worth surfacing to the caller.
+      objects:
+        type: array
+        items:
+          type: object
+          properties:
+            label: {type: string}
+            maskPath: {type: string}
+        description: One entry per tracked/segmented object, if the task involved more than one.
+  # One corrective re-prompt if the model's final answer doesn't validate
+  # against response_schema -- cheap insurance against a model that
+  # forgets outputPath, without masking a real repeated failure.
+  response_retries: 1
+  # A final answer that still doesn't validate after the retry is a hard
+  # failure (outcome=invalid_output), not a silent "return prose instead" --
+  # a caller depending on outputPath should never get an unparseable result.
+  error_strategy: strict
+
+  # Left empty: the service (or a dev invoking `fabri run` directly) passes
+  # --system-prompt-file .agent/prompts/orchestrator.md, which resolves the
+  # actual system_prompt at the CLI layer.
+  system_prompt: ""
+
+llm:
+  # Gemini as the single provider for BOTH roles: the orchestrator's own
+  # tool-calling loop AND vid_ground_text's vision call (google-genai) share
+  # one GEMINI_API_KEY -- one key to configure, no second provider account
+  # needed to exercise the full happy path end to end.
+  provider: gemini
+  # gemini-2.5-pro (not flash): grounding + multi-step tool orchestration
+  # here benefits from the stronger model -- this agent's whole job is
+  # picking the right vid_* tool and coordinate math off its outputs
+  # (rescaling ground_text boxes into segment/track prompts), where a
+  # flash-tier mistake silently produces a wrong mask instead of an
+  # obvious tool error. Budget-capped via max_cost_usd above regardless.
+  model: gemini-2.5-pro
+  api_key_env: GEMINI_API_KEY
+  max_tokens: 8192
+  # Extended prompt caching is Anthropic-only; a no-op on Gemini, so left
+  # off rather than set true-and-ignored.
+  cache_messages: false
+
+  # Optional cheap narrator role: emits a one-sentence "what's happening
+  # now" between tool steps (e.g. "tracking the ball across 40 frames..."),
+  # useful for a live-progress UI during a long vid_track poll loop. Its
+  # own free-tier bucket, separate from the main model's quota, and small
+  # enough not to move max_cost_usd meaningfully. Set to null to silence.
+  narrator:
+    model: gemini-2.5-flash-lite
+    max_tokens: 64
+
+tools:
+  manifest_dir:
+    - builtin                # read_file/write_file/list_dir for path bookkeeping
+    - tools/video_editing     # the 9 vid_* tools
+  # Explicit allow-list (not null) so a future manifest dropped into
+  # tools/video_editing/ (or a stray builtin like python_exec, which this
+  # agent has no business calling -- it never needs arbitrary code
+  # execution, only the fixed vid_* surface) isn't silently exposed to the
+  # model without a deliberate edit here.
+  enabled:
+    - read_file
+    - write_file
+    - list_dir
+    - vid_extract_frame
+    - vid_ground_text
+    - vid_segment
+    - vid_track
+    - vid_poll_job
+    - vid_export_matte
+    - vid_composite
+    - vid_trim
+    - vid_concat
+  # Relative to the per-run materialized work dir the service cd's into
+  # before launching fabri (matches ludexel-gba's "project" convention).
+  sandbox_root: project
+  # TOON cuts tool-result tokens fed back into the model ~30-40% vs JSON
+  # (see fabri docs/creating-an-agent.md); this agent's tool results are
+  # small JSON objects (paths, dims, job status), so there's no reliability
+  # downside -- pure token savings on every vid_poll_job round trip.
+  result_format: toon
+  decompose:
+    # The domain prompt already encodes the tool order (extract -> ground
+    # -> segment/track -> export/composite); a research-style decompose
+    # pass would just add a step for no benefit on a single fixed pipeline.
+    enabled: false
+
+memory:
+  backend: sqlite              # single-tenant/dev-scoped agent (matches the
+                                # vid_track job queue's own file-based, not
+                                # Celery/RQ, design) -- no Qdrant service to
+                                # stand up just to run this agent locally.
+  collection: fabri_websam_video
+  top_k: 8                     # small tool surface (9 tools); a handful of
+                                # relevant prior guidelines/successes is
+                                # enough context without crowding the prompt.
+  similarity_threshold: 0.8
+  promotion_threshold_sessions: 3
+  guideline_max_tokens: 60

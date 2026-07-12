@@ -1,0 +1,20 @@
+{
+  "name": "vid_concat",
+  "description": "Concatenate multiple video clips in order into one mp4. args: {videos: [path, ...]} (each sandbox-relative, at least 2 paths, all resampled to the first clip's fps). Returns {outputPath, durationSec}. Use after vid_trim to assemble a sequence of clips.",
+  "command": ["python3", "vid_concat.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "videos": {"type": "array", "items": {"type": "string"}, "minItems": 2}
+    },
+    "required": ["videos"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "outputPath": {"type": "string"},
+      "durationSec": {"type": "number"}
+    }
+  },
+  "timeout_s": 60
+}

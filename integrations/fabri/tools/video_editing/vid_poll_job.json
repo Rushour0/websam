@@ -1,0 +1,14 @@
+{
+  "name": "vid_poll_job",
+  "description": "Check the status of a background vid_track job. args: {jobId}. Returns {status: 'running'|'done'|'error', progress?: number, maskDir?: string, maskRlePath?: string, frameCount?: number, error?: string} once done. Poll every few seconds until status is 'done' or 'error'.",
+  "command": ["python3", "vid_poll_job.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "jobId": {"type": "string"}
+    },
+    "required": ["jobId"]
+  },
+  "output_schema": {"type": "object"},
+  "timeout_s": 10
+}

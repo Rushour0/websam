@@ -1,0 +1,22 @@
+{
+  "name": "vid_trim",
+  "description": "Cut a video to the time range [startSec, endSec]. args: {video, startSec, endSec} (video is sandbox-relative; startSec/endSec are seconds, endSec exclusive). Returns {outputPath, durationSec} where outputPath is a sandbox-relative mp4 path. Use this before vid_concat to assemble a clip from a longer source.",
+  "command": ["python3", "vid_trim.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "video": {"type": "string"},
+      "startSec": {"type": "number"},
+      "endSec": {"type": "number"}
+    },
+    "required": ["video", "startSec", "endSec"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "outputPath": {"type": "string"},
+      "durationSec": {"type": "number"}
+    }
+  },
+  "timeout_s": 30
+}

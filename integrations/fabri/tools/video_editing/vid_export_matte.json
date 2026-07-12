@@ -1,0 +1,25 @@
+{
+  "name": "vid_export_matte",
+  "description": "Package a tracked object's per-frame masks into a downloadable artifact. args: {masksDir?, rleJson?, format: 'png-sequence'|'mp4-cutout', video?} — exactly one of masksDir (a sandbox-relative dir of frame-*.png mask files) or rleJson (a sandbox-relative path to a COCO-RLE masks.rle.json, either a single {width,height,counts} object or a list of them). 'png-sequence' (default, most portable) zips the masks into matte.zip. 'mp4-cutout' additionally needs `video` (the source clip) and alpha-composites the mask onto it as an MP4 cutout, falling back to matte.zip with a 'warning' field if that isn't possible in this environment. Returns {outputPath, frames, format}.",
+  "command": ["python3", "vid_export_matte.py"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "masksDir": {"type": "string"},
+      "rleJson": {"type": "string"},
+      "format": {"type": "string", "enum": ["png-sequence", "mp4-cutout"]},
+      "video": {"type": "string"}
+    },
+    "required": ["format"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "outputPath": {"type": "string"},
+      "frames": {"type": "integer"},
+      "format": {"type": "string"},
+      "warning": {"type": "string"}
+    }
+  },
+  "timeout_s": 60
+}
