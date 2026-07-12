@@ -70,22 +70,32 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-/** "Nice" tick spacing in frames, chosen so ticks land roughly every 60-120px. */
+/** "Nice" tick spacing in frames, chosen so ticks land roughly every 60-120px.
+ * Extends below 1 second (down to 1ms) so zooming in far enough exposes
+ * sub-second tick spacing instead of bottoming out at whole seconds; actual
+ * spacing still can't go finer than 1 frame (the timeline's atomic unit). */
 function tickIntervalFrames(zoom: number, fps: number): number {
   const targetPx = 80;
   const rawFrames = targetPx / zoom;
   const rawSeconds = rawFrames / fps;
-  const niceSeconds = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600].find((s) => s >= rawSeconds) ?? 3600;
+  const niceSeconds = [
+    0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600,
+  ].find((s) => s >= rawSeconds) ?? 3600;
   return Math.max(1, Math.round(niceSeconds * fps));
 }
 
-function formatTimecode(frame: number, fps: number): string {
+/** `showMs` appends `.mmm` (millisecond depth) — used once tick/ruler spacing
+ * has zoomed past whole-second granularity. */
+function formatTimecode(frame: number, fps: number, showMs = false): string {
   const totalSec = frame / fps;
   const h = Math.floor(totalSec / 3600);
   const m = Math.floor((totalSec % 3600) / 60);
   const s = Math.floor(totalSec % 60);
   const parts = h > 0 ? [h, m, s] : [m, s];
-  return parts.map((p, i) => (i === 0 ? String(p) : String(p).padStart(2, '0'))).join(':');
+  const base = parts.map((p, i) => (i === 0 ? String(p) : String(p).padStart(2, '0'))).join(':');
+  if (!showMs) return base;
+  const ms = Math.round((totalSec - Math.floor(totalSec)) * 1000);
+  return `${base}.${String(ms).padStart(3, '0')}`;
 }
 
 interface RulerProps {
@@ -101,6 +111,9 @@ function Ruler({ widthPx, zoom, fps, onScrub }: RulerProps): React.JSX.Element {
   const totalFrames = Math.ceil(widthPx / zoom);
   const ticks: number[] = [];
   for (let f = 0; f <= totalFrames; f += interval) ticks.push(f);
+  // Once tick spacing is finer than one second, whole-second labels would
+  // collide/repeat — show millisecond depth instead.
+  const showMs = interval < fps;
 
   const frameFromClientX = useCallback(
     (clientX: number) => {
@@ -134,7 +147,7 @@ function Ruler({ widthPx, zoom, fps, onScrub }: RulerProps): React.JSX.Element {
         <div key={f} className="absolute top-0 flex h-full flex-col justify-end" style={{ left: f * zoom }}>
           <div className="h-2 w-px bg-border" />
           <span className="absolute bottom-2 left-1 whitespace-nowrap text-[9px] text-muted-foreground">
-            {formatTimecode(f, fps)}
+            {formatTimecode(f, fps, showMs)}
           </span>
         </div>
       ))}
@@ -556,28 +569,40 @@ export function Timeline(): React.JSX.Element {
           <Ruler widthPx={contentWidthPx} zoom={zoom} fps={fps} onScrub={handleScrub} />
 
           <div className="relative flex flex-col gap-1 pt-1">
-            {orderedTracks.length === 0 ? (
-              <p className="p-4 text-center text-xs text-muted-foreground">
-                No tracks yet — drop a clip from Media to create one, or click + Track.
-              </p>
-            ) : (
-              orderedTracks.map((track) => (
-                <TrackRow
-                  key={track.id}
-                  track={track}
-                  timelineClips={timelineClips}
-                  clips={clips}
-                  zoom={zoom}
-                  widthPx={contentWidthPx}
-                  selectedTimelineClipId={selection.timelineClipId}
-                  onSelectClip={selectTimelineClip}
-                />
-              ))
-            )}
+            {orderedTracks.map((track) => (
+              <TrackRow
+                key={track.id}
+                track={track}
+                timelineClips={timelineClips}
+                clips={clips}
+                zoom={zoom}
+                widthPx={contentWidthPx}
+                selectedTimelineClipId={selection.timelineClipId}
+                onSelectClip={selectTimelineClip}
+              />
+            ))}
           </div>
 
           <Playhead frame={playhead} zoom={zoom} heightPx={RULER_HEIGHT + tracksHeightPx} />
         </div>
+
+        {orderedTracks.length === 0 ? (
+          // A true overlay: `position: absolute` on a direct child of
+          // `scrollContainerRef` (the `relative overflow-auto` box) is
+          // positioned against that box's OWN padding edges, which are fixed
+          // regardless of scroll position — it does not scroll with, resize
+          // with, or add to the zoom-scaled `width: contentWidthPx` sibling
+          // above, so it always stays centered on the visible panel and is
+          // completely unaffected by zoom.
+          <div
+            className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center justify-center"
+            style={{ top: RULER_HEIGHT }}
+          >
+            <p className="p-4 text-center text-xs text-muted-foreground">
+              No tracks yet — drop a clip from Media to create one, or click + Track.
+            </p>
+          </div>
+        ) : null}
       </div>
     </div>
   );
