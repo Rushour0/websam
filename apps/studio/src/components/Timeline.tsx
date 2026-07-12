@@ -436,13 +436,23 @@ export function Timeline(): React.JSX.Element {
     return max;
   }, [timelineClips, clips]);
 
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const prevFullDurationRef = useRef(0);
+  const [containerWidthPx, setContainerWidthPx] = useState(0);
+
   // One-second tail past the last clip: keeps a drop zone visible and feeds the
   // same slack into the fit divisor so fit never leaves a permanent scrollbar.
   const tailFrames = Math.round(fps);
-  const contentWidthPx =
+  const durationWidthPx =
     fullDurationFrames > 0
       ? Math.max(800, (Math.max(fullDurationFrames, maxEndFrame) + tailFrames) * zoom)
       : Math.max(800, Math.round(fps * 5) * zoom);
+  // Never narrower than the visible scroll area (so the ruler/lanes fill the
+  // panel instead of floating as a small island with dead space to the
+  // right), and never narrower than wherever the playhead currently sits
+  // (a playhead left over from clips since deleted must stay inside the
+  // ruled/visible region, never render past it).
+  const contentWidthPx = Math.max(durationWidthPx, containerWidthPx, playhead * zoom + tailFrames * zoom);
   const tracksHeightPx = tracks.length * (TRACK_HEIGHT + TRACK_GAP);
 
   const selectedTc = selection.timelineClipId ? timelineClips[selection.timelineClipId] : undefined;
@@ -451,21 +461,21 @@ export function Timeline(): React.JSX.Element {
     playhead > selectedTc.startFrame &&
     playhead < selectedTc.startFrame + (selectedTc.outFrame - selectedTc.inFrame + 1);
 
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const prevFullDurationRef = useRef(0);
   useEffect(() => {
     const el = scrollContainerRef.current;
-    if (!el || fullDurationFrames <= 0) {
-      prevFullDurationRef.current = fullDurationFrames;
-      return;
-    }
+    if (!el) return;
+    const measure = () => setContainerWidthPx(el.clientWidth);
     const fit = () => {
+      measure();
+      if (fullDurationFrames <= 0) return;
       const w = el.clientWidth;
       if (w > 0) setZoom(clamp(w / (fullDurationFrames + tailFrames), MIN_ZOOM, MAX_ZOOM));
     };
     if (prevFullDurationRef.current !== fullDurationFrames) {
       prevFullDurationRef.current = fullDurationFrames;
       fit();
+    } else {
+      measure();
     }
     if (typeof ResizeObserver === 'undefined') return;
     const ro = new ResizeObserver(fit);
