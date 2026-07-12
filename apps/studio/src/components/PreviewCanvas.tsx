@@ -232,6 +232,9 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [videoReady, setVideoReady] = useState(false);
   const [, forceRedraw] = useState(0);
+  // True once the current clip activation has forced at least one genuine
+  // (non-no-op) seek — see the seek effect below for why this is needed.
+  const forcedInitialSeekRef = useRef(false);
 
   // Presentational, DOM-ref-adjacent state driving the offscreen <video>
   // directly — NOT shared app state, so it stays local per the store contract's
@@ -306,6 +309,7 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
     const video = videoRef.current;
     if (!video) return;
     setVideoReady(false);
+    forcedInitialSeekRef.current = false;
     if (clip) {
       if (video.src !== clip.objectUrl) video.src = clip.objectUrl;
     } else {
@@ -317,10 +321,7 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    const onLoaded = () => {
-      setVideoReady(true);
-      layerRef.current?.batchDraw();
-    };
+    const onLoaded = () => setVideoReady(true);
     // When playback reaches the clip's end the video simply stops and the rvfc
     // loop stops ticking; without this, store.isPlaying stays true and both the
     // overlay and Toolbar keep showing a Pause icon over a frozen frame.
@@ -332,6 +333,7 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
       video.removeEventListener('ended', onEnded);
     };
   }, [videoRef, setIsPlaying]);
+
 
   // Sync play/pause with `store.isPlaying`.
   useEffect(() => {
@@ -392,14 +394,30 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
   }, [clip, isPlaying, setPlayhead, videoRef]);
 
   // While NOT playing (scrub from Timeline, or a track-driven playhead
-  // update), seek the shared <video> to match `playhead` and redraw.
+  // update), seek the shared <video> to match `playhead` and redraw. Waits
+  // for `videoReady` so the very first seek of a freshly-activated clip is
+  // included (not skipped as a same-render race before load completes).
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !clip || isPlaying) return;
+    if (!video || !clip || isPlaying || !videoReady) return;
     const fps = clip.fps > 0 ? clip.fps : 30;
     const targetTime = playhead / fps;
-    if (Math.abs(video.currentTime - targetTime) > 1e-3) {
-      video.currentTime = Math.max(0, Math.min(targetTime, video.duration || targetTime));
+    const needsSeek = Math.abs(video.currentTime - targetTime) > 1e-3;
+    // A hidden (`display: none`) <video> used purely as a canvas image
+    // source does not reliably decode/present its first frame in Chromium
+    // just because `readyState`/`loadeddata` already report data as
+    // available — the compositor only actually produces presentable pixels
+    // once a real seek (or play) is issued. So the FIRST time a newly-
+    // activated clip becomes ready, force a genuine seek even when
+    // `targetTime` numerically already matches `video.currentTime` (a
+    // same-value reassignment is a no-op in most engines and would never
+    // trigger this). Every subsequent seek behaves as before (skip the
+    // no-op case) once that initial kick has happened.
+    const forceKick = !forcedInitialSeekRef.current;
+    if (needsSeek || forceKick) {
+      const base = Math.max(0, Math.min(targetTime, video.duration || targetTime));
+      video.currentTime = forceKick && !needsSeek ? Math.min(video.duration || base, base + 0.0001) : base;
+      forcedInitialSeekRef.current = true;
     }
     const onSeeked = () => layerRef.current?.batchDraw();
     video.addEventListener('seeked', onSeeked, { once: true });
@@ -407,7 +425,7 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
     // 'seeked' event fires) — e.g. re-selecting the same frame.
     layerRef.current?.batchDraw();
     return () => video.removeEventListener('seeked', onSeeked);
-  }, [playhead, isPlaying, clip, videoRef]);
+  }, [playhead, isPlaying, clip, videoRef, videoReady]);
 
   // -------------------------------------------------------------------
   // Mask overlay bitmaps: only for the frame each live mask is actually
