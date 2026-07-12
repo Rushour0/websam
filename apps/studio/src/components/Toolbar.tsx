@@ -8,7 +8,11 @@
 import {
   Cpu,
   Download,
+  MessageSquare,
   MousePointer2,
+  PanelBottom,
+  PanelLeft,
+  PanelRight,
   Pause,
   Play,
   Plus,
@@ -19,8 +23,9 @@ import {
 
 import { Button } from './ui/button.js';
 import { ToggleGroup, ToggleGroupItem } from './ui/toggle-group.js';
+import { cn } from '../lib/utils.js';
 import { useStudioStore } from '../store/studio-store.js';
-import type { ModelStatus, ToolMode } from '../store/studio-store.js';
+import type { ModelStatus, PanelVisibility, ToolMode } from '../store/studio-store.js';
 
 /** Human-readable label + tone for the model-status pill. */
 function statusLabel(status: ModelStatus): string {
@@ -38,9 +43,37 @@ function statusLabel(status: ModelStatus): string {
   }
 }
 
+interface PanelToggleProps {
+  panelKey: keyof PanelVisibility;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+}
+
+/** One show/hide toggle for an `App.tsx` panel — reads/writes `store.panels`
+ * only; `App.tsx` is the one that actually collapses/expands the panel. */
+function PanelToggle({ panelKey, label, icon: Icon }: PanelToggleProps): React.JSX.Element {
+  const visible = useStudioStore((s) => s.panels[panelKey]);
+  const togglePanel = useStudioStore((s) => s.togglePanel);
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      aria-label={visible ? `Hide ${label}` : `Show ${label}`}
+      aria-pressed={visible}
+      title={visible ? `Hide ${label}` : `Show ${label}`}
+      className={cn('h-8 w-8', !visible && 'text-muted-foreground/50')}
+      onClick={() => togglePanel(panelKey)}
+    >
+      <Icon className="h-4 w-4" />
+    </Button>
+  );
+}
+
 /**
- * Studio toolbar: tool selection, playback, tracking, export, and
- * model/device status. See `studio-contracts.md` §3 for the full contract.
+ * Studio toolbar: tool selection, playback, tracking, export, panel
+ * visibility, and model/device status. See `studio-contracts.md` §3 for the
+ * full contract.
  */
 export function Toolbar(): React.JSX.Element {
   const tool = useStudioStore((s) => s.tool);
@@ -153,6 +186,15 @@ export function Toolbar(): React.JSX.Element {
       </Button>
 
       <div className="flex-1" />
+
+      <div className="flex items-center gap-0.5">
+        <PanelToggle panelKey="media" label="Media panel" icon={PanelLeft} />
+        <PanelToggle panelKey="properties" label="Properties panel" icon={PanelRight} />
+        <PanelToggle panelKey="chat" label="Assistant panel" icon={MessageSquare} />
+        <PanelToggle panelKey="timeline" label="Timeline" icon={PanelBottom} />
+      </div>
+
+      <div className="mx-1 h-6 w-px bg-border" />
 
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <span

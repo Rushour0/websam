@@ -256,3 +256,38 @@ describe('studio-store: removeObject', () => {
     expect(state.selection.objectId).toBeNull();
   });
 });
+
+describe('studio-store: panel visibility', () => {
+  beforeEach(resetStore);
+
+  it('all panels start visible', () => {
+    expect(useStudioStore.getState().panels).toEqual({
+      media: true,
+      properties: true,
+      chat: true,
+      timeline: true,
+    });
+  });
+
+  it('togglePanel flips only the targeted panel', () => {
+    useStudioStore.getState().togglePanel('properties');
+    expect(useStudioStore.getState().panels).toEqual({
+      media: true,
+      properties: false,
+      chat: true,
+      timeline: true,
+    });
+
+    useStudioStore.getState().togglePanel('properties');
+    expect(useStudioStore.getState().panels.properties).toBe(true);
+  });
+
+  it('setPanelVisible sets an explicit value regardless of current state', () => {
+    useStudioStore.getState().setPanelVisible('timeline', false);
+    expect(useStudioStore.getState().panels.timeline).toBe(false);
+    useStudioStore.getState().setPanelVisible('timeline', false);
+    expect(useStudioStore.getState().panels.timeline).toBe(false);
+    useStudioStore.getState().setPanelVisible('timeline', true);
+    expect(useStudioStore.getState().panels.timeline).toBe(true);
+  });
+});

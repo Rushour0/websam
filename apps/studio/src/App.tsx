@@ -15,6 +15,7 @@ import type { ErrorInfo, ReactNode } from 'react';
 import { DndContext, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
 import type { DragEndEvent } from '@dnd-kit/core';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
+import type { ImperativePanelGroupHandle } from 'react-resizable-panels';
 
 import { useStudioStore } from './store/studio-store.js';
 import type { TimelineClip } from './store/studio-store.js';
@@ -155,6 +156,45 @@ export function App(): JSX.Element {
   const videoRef = useRef<HTMLVideoElement>(null);
   const stageContainerRef = useRef<HTMLDivElement>(null);
 
+  const horizontalGroupRef = useRef<ImperativePanelGroupHandle>(null);
+  const verticalGroupRef = useRef<ImperativePanelGroupHandle>(null);
+
+  const panels = useStudioStore((s) => s.panels);
+
+  // Base (all-visible) size weights, same ratios as each Panel's `defaultSize`
+  // below — kept here too so a hidden panel's freed share redistributes back
+  // proportionally to these weights once every panel is visible again.
+  const HORIZONTAL_WEIGHTS = { media: 20, preview: 44, properties: 16, chat: 20 };
+  const VERTICAL_WEIGHTS = { main: 70, timeline: 30 };
+
+  /** Percentage layout array for a `PanelGroup`: 0 for each hidden panel,
+   * the rest re-normalized so the VISIBLE panels' weights still sum to 100. */
+  function computeLayout(weights: Record<string, number>, visible: Record<string, boolean>): number[] {
+    const keys = Object.keys(weights);
+    const totalVisibleWeight = keys.reduce((sum, k) => sum + (visible[k] ? weights[k]! : 0), 0);
+    if (totalVisibleWeight <= 0) return keys.map(() => 0);
+    return keys.map((k) => (visible[k] ? (weights[k]! / totalVisibleWeight) * 100 : 0));
+  }
+
+  // Store -> panel: whenever `store.panels` changes (Toolbar's toggle buttons
+  // write there), assign each `PanelGroup`'s ENTIRE layout array atomically
+  // via `setLayout` — deliberately NOT per-panel `.collapse()`/`.expand()`.
+  // Confirmed by direct instrumentation: collapsing one panel via its own
+  // imperative handle redistributes freed space across ALL siblings
+  // (including already-collapsed ones) via the library's own internal
+  // layout recompute, which can silently re-grow an already-hidden sibling
+  // back to a nonzero size as a side effect of a LATER, unrelated collapse —
+  // repeatable in sequence (hide Properties, then hide Chat, silently
+  // re-expands Properties). `setLayout([...])` sets every panel's size in
+  // one atomic call instead of relying on N independent redistribution
+  // passes, which sidesteps that failure mode entirely.
+  useEffect(() => {
+    horizontalGroupRef.current?.setLayout(
+      computeLayout(HORIZONTAL_WEIGHTS, { media: panels.media, preview: true, properties: panels.properties, chat: panels.chat }),
+    );
+    verticalGroupRef.current?.setLayout(computeLayout(VERTICAL_WEIGHTS, { main: true, timeline: panels.timeline }));
+  }, [panels.media, panels.properties, panels.chat, panels.timeline]);
+
   const addTimelineClip = useStudioStore((s) => s.addTimelineClip);
   const moveTimelineClip = useStudioStore((s) => s.moveTimelineClip);
   const addTrack = useStudioStore((s) => s.addTrack);
@@ -236,26 +276,28 @@ export function App(): JSX.Element {
         <Toolbar />
         <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
           <div className="min-h-0 flex-1">
-            <PanelGroup direction="vertical">
-              <Panel defaultSize={70} minSize={30}>
-                <PanelGroup direction="horizontal">
-                  <Panel defaultSize={20} minSize={12}>
+            <PanelGroup ref={verticalGroupRef} direction="vertical">
+              <Panel id="panel-main" defaultSize={70} minSize={30}>
+                <PanelGroup ref={horizontalGroupRef} direction="horizontal">
+                  <Panel id="panel-media" defaultSize={20} minSize={12} collapsible collapsedSize={0}>
                     <MediaLibrary />
                   </Panel>
                   <PanelResizeHandle className="w-1 bg-border transition-colors hover:bg-ring" />
-                  <Panel defaultSize={44} minSize={30}>
+                  <Panel id="panel-preview" defaultSize={44} minSize={30}>
                     <PreviewCanvas videoRef={videoRef} stageContainerRef={stageContainerRef} />
                   </Panel>
                   <PanelResizeHandle className="w-1 bg-border transition-colors hover:bg-ring" />
-                  <Panel defaultSize={16} minSize={14}>
+                  <Panel id="panel-properties" defaultSize={16} minSize={14} collapsible collapsedSize={0}>
                     <PropertiesPanel />
                   </Panel>
                   <PanelResizeHandle className="w-1 bg-border transition-colors hover:bg-ring" />
-                  <Panel defaultSize={20} minSize={14}><ChatPanel /></Panel>
+                  <Panel id="panel-chat" defaultSize={20} minSize={14} collapsible collapsedSize={0}>
+                    <ChatPanel />
+                  </Panel>
                 </PanelGroup>
               </Panel>
               <PanelResizeHandle className="h-1 bg-border transition-colors hover:bg-ring" />
-              <Panel defaultSize={30} minSize={15}>
+              <Panel id="panel-timeline" defaultSize={30} minSize={15} collapsible collapsedSize={0}>
                 <Timeline />
               </Panel>
             </PanelGroup>

@@ -104,6 +104,15 @@ export type ExportState =
   | { phase: 'done'; fileName: string; framesExported: number }
   | { phase: 'error'; message: string };
 
+/** One entry per hide/show-able panel in `App.tsx`'s layout (PreviewCanvas is
+ * always visible — it's the primary content, not a toggleable panel). */
+export interface PanelVisibility {
+  media: boolean;
+  properties: boolean;
+  chat: boolean;
+  timeline: boolean;
+}
+
 export interface StudioState {
   // media + timeline
   clips: Record<string, ClipMeta>;
@@ -113,6 +122,11 @@ export interface StudioState {
   playhead: number;
   isPlaying: boolean;
   zoom: number;
+  /** Which side/bottom panels are shown — `App.tsx` drives its
+   * `react-resizable-panels` collapse/expand from this; `Toolbar.tsx` renders
+   * the show/hide toggle buttons (this component only reads/writes the
+   * store, per the panel-ownership convention — App owns the panel refs). */
+  panels: PanelVisibility;
 
   // prompting / segmentation UI
   tool: ToolMode;
@@ -147,6 +161,9 @@ export interface StudioState {
   setPlayhead: (frame: number) => void;
   setIsPlaying: (playing: boolean) => void;
   setZoom: (pxPerFrame: number) => void;
+
+  togglePanel: (key: keyof PanelVisibility) => void;
+  setPanelVisible: (key: keyof PanelVisibility, visible: boolean) => void;
 
   setTool: (tool: ToolMode) => void;
   selectTimelineClip: (id: string | null) => void;
@@ -240,6 +257,7 @@ export const useStudioStore = create<StudioState>()(
     playhead: 0,
     isPlaying: false,
     zoom: 4,
+    panels: { media: true, properties: true, chat: true, timeline: true },
 
     tool: 'select',
     activeClipId: null,
@@ -535,6 +553,9 @@ export const useStudioStore = create<StudioState>()(
     setPlayhead: (frame: number) => set({ playhead: Math.max(0, frame) }),
     setIsPlaying: (playing: boolean) => set({ isPlaying: playing }),
     setZoom: (pxPerFrame: number) => set({ zoom: Math.max(0.01, pxPerFrame) }),
+
+    togglePanel: (key) => set((state) => ({ panels: { ...state.panels, [key]: !state.panels[key] } })),
+    setPanelVisible: (key, visible) => set((state) => ({ panels: { ...state.panels, [key]: visible } })),
 
     setTool: (tool: ToolMode) =>
       set((state) => {
