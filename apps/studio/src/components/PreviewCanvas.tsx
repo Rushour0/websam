@@ -28,13 +28,15 @@
  *  - `select` / `pan`: no segmentation call.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { PointerEvent as ReactPointerEvent, RefObject } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, RefObject } from 'react';
 import Konva from 'konva';
+import { Pause, Play, Volume2, VolumeX } from 'lucide-react';
 import { Circle, Image as KonvaImage, Layer, Line, Rect, Stage } from 'react-konva';
 import type { MaskResult, Prompt } from '@websam3/core';
 
 import { useStudioStore } from '../store/studio-store.js';
 import type { ToolMode, TrackedObject } from '../store/studio-store.js';
+import { cn } from '../lib/utils.js';
 import { timeToFrameIndex } from '../video/frame-source.js';
 
 /** Refs `App.tsx` owns and hands down so the segmentation module and this
@@ -81,6 +83,131 @@ function fitContain(srcW: number, srcH: number, boxW: number, boxH: number): { w
   return { width: srcW * scale, height: srcH * scale };
 }
 
+/** `frame` at `fps` → `m:ss` (caption for the on-canvas playback overlay). */
+function formatTime(frame: number, fps: number): string {
+  const totalSec = frame / (fps > 0 ? fps : 30);
+  const m = Math.floor(totalSec / 60);
+  const s = Math.floor(totalSec % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+interface OverlaySliderProps {
+  ariaLabel: string;
+  value: number;
+  min: number;
+  max: number;
+  /** Keyboard/pointer quantum (arrow step; pointer positions snap to it). */
+  step: number;
+  /** Larger jump for Shift+Arrow (defaults to `step`). */
+  bigStep?: number;
+  /** Human-readable announcement of `value` for assistive tech (`aria-valuetext`). */
+  ariaValueText?: string;
+  /** Dims the fill (muted output) without changing the announced value. */
+  dimmed?: boolean;
+  className?: string;
+  onChange: (value: number) => void;
+  /** Fired once at the start of any interaction (pointer OR keyboard) before the
+   * first `onChange` (e.g. pause-on-scrub, so a seek is not immediately
+   * overwritten by the still-running playback loop). */
+  onScrubStart?: () => void;
+}
+
+/**
+ * Minimal-chrome range control for the playback overlay. A bespoke variant of
+ * `Timeline.tsx`'s `TrimHandle` precedent (`role="slider"` + full ARIA +
+ * keyboard) rather than `ui/slider.tsx`, whose `bg-primary` (near-black) Range
+ * is invisible over dark footage and whose Track/Range classNames are locked
+ * inside the primitive — see `DESIGN.md` §2/§9. White-alpha on `neutral-950`,
+ * hue-free, matching the `#ffffff` Konva prompt/drag-box strokes.
+ */
+function OverlaySlider({
+  ariaLabel,
+  value,
+  min,
+  max,
+  step,
+  bigStep,
+  ariaValueText,
+  dimmed,
+  className,
+  onChange,
+  onScrubStart,
+}: OverlaySliderProps): React.JSX.Element {
+  const trackRef = useRef<HTMLDivElement>(null);
+  // True only between this slider's own pointer-down and its release, so a
+  // press-drag begun on a sibling control (button) that slides across this
+  // track cannot fire onChange mid-click (buttons===1 alone can't tell whose
+  // drag it is).
+  const isDraggingRef = useRef(false);
+  const span = Math.max(1, max - min);
+  const pct = Math.min(100, Math.max(0, ((value - min) / span) * 100));
+
+  const valueFromClientX = (clientX: number): number => {
+    const el = trackRef.current;
+    if (!el) return value;
+    const rect = el.getBoundingClientRect();
+    const frac = rect.width > 0 ? Math.min(1, Math.max(0, (clientX - rect.left) / rect.width)) : 0;
+    const raw = min + frac * (max - min);
+    return Math.min(max, Math.max(min, Math.round(raw / step) * step));
+  };
+
+  const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    onScrubStart?.();
+    isDraggingRef.current = true;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    onChange(valueFromClientX(e.clientX));
+  };
+  const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!isDraggingRef.current || e.buttons !== 1) return;
+    onChange(valueFromClientX(e.clientX));
+  };
+  const endDrag = () => {
+    isDraggingRef.current = false;
+  };
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const large = bigStep ?? step;
+    let next: number | null = null;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') next = value - (e.shiftKey ? large : step);
+    else if (e.key === 'ArrowRight' || e.key === 'ArrowUp') next = value + (e.shiftKey ? large : step);
+    else if (e.key === 'Home') next = min;
+    else if (e.key === 'End') next = max;
+    if (next === null) return;
+    e.preventDefault();
+    // Match pointer order: signal interaction start (e.g. pause-on-scrub) BEFORE
+    // committing the value, so keyboard seek during playback isn't a silent
+    // no-op overwritten by the next video frame.
+    onScrubStart?.();
+    onChange(Math.min(max, Math.max(min, next)));
+  };
+
+  return (
+    <div
+      ref={trackRef}
+      role="slider"
+      aria-label={ariaLabel}
+      aria-orientation="horizontal"
+      aria-valuemin={min}
+      aria-valuemax={max}
+      aria-valuenow={value}
+      aria-valuetext={ariaValueText}
+      tabIndex={0}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={endDrag}
+      onLostPointerCapture={endDrag}
+      onKeyDown={onKeyDown}
+      className={cn(
+        'relative flex h-6 cursor-pointer items-center rounded-md focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/80 focus-visible:ring-offset-1 focus-visible:ring-offset-neutral-950',
+        className,
+      )}
+    >
+      <div className={cn('h-1 w-full overflow-hidden rounded-full bg-white/25', dimmed && 'opacity-40')}>
+        <div className="h-full bg-white/90" style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
 /**
  * The studio's video + mask + prompt viewport. See the module doc comment
  * and `studio-contracts.md` §3 for the full contract.
@@ -90,6 +217,7 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
   const activeClipId = useStudioStore((s) => s.activeClipId);
   const tool = useStudioStore((s) => s.tool);
   const isPlaying = useStudioStore((s) => s.isPlaying);
+  const setIsPlaying = useStudioStore((s) => s.setIsPlaying);
   const playhead = useStudioStore((s) => s.playhead);
   const setPlayhead = useStudioStore((s) => s.setPlayhead);
   const objects = useStudioStore((s) => s.objects);
@@ -104,6 +232,28 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [videoReady, setVideoReady] = useState(false);
   const [, forceRedraw] = useState(0);
+
+  // Presentational, DOM-ref-adjacent state driving the offscreen <video>
+  // directly — NOT shared app state, so it stays local per the store contract's
+  // transient-state carve-out (studio-contracts.md §3). `muted` starts true to
+  // preserve today's silent/autoplay-safe behavior (the JSX `muted` attribute
+  // moved here so unmuting is possible).
+  const [volume, setVolume] = useState(1);
+  const [muted, setMuted] = useState(true);
+  // Level to restore when unmuting via the speaker button (so it returns to the
+  // pre-mute volume rather than jumping to full).
+  const lastVolumeRef = useRef(1);
+
+  // Prompt tools own click-to-add on the Stage; the overlay bar sits above the
+  // Stage and its full-width Seek slider would otherwise intercept a prompt
+  // click landing over the bottom strip. Suppress the bar (no pointer events,
+  // hidden) whenever a prompt tool is armed; select/pan keep it (they already
+  // own click-to-play, so competing hover reveal is coherent there).
+  const promptToolActive = tool === 'point-add' || tool === 'point-remove' || tool === 'box';
+
+  // Distinguishes a click (toggle play) from a drag on the select/pan tools —
+  // records the pointer-down position so pointer-up can measure travel.
+  const clickStartRef = useRef<{ x: number; y: number } | null>(null);
 
   // Accumulated click points per objectId at its current prompt frame —
   // mirrors the demo's `objectsRef`/`points` pattern (session.refineObject
@@ -171,9 +321,17 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
       setVideoReady(true);
       layerRef.current?.batchDraw();
     };
+    // When playback reaches the clip's end the video simply stops and the rvfc
+    // loop stops ticking; without this, store.isPlaying stays true and both the
+    // overlay and Toolbar keep showing a Pause icon over a frozen frame.
+    const onEnded = () => setIsPlaying(false);
     video.addEventListener('loadeddata', onLoaded);
-    return () => video.removeEventListener('loadeddata', onLoaded);
-  }, [videoRef]);
+    video.addEventListener('ended', onEnded);
+    return () => {
+      video.removeEventListener('loadeddata', onLoaded);
+      video.removeEventListener('ended', onEnded);
+    };
+  }, [videoRef, setIsPlaying]);
 
   // Sync play/pause with `store.isPlaying`.
   useEffect(() => {
@@ -182,6 +340,15 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
     if (isPlaying) void video.play().catch(() => undefined);
     else video.pause();
   }, [isPlaying, videoRef]);
+
+  // Drive the offscreen <video>'s volume/mute from local state (replaces the
+  // former hard `muted` JSX attribute).
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.volume = volume;
+    video.muted = muted;
+  }, [volume, muted, videoRef]);
 
   // -------------------------------------------------------------------
   // requestVideoFrameCallback (rAF fallback) loop: video clock -> playhead,
@@ -366,6 +533,14 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
   const handlePointerDown = useCallback(
     (evt: Konva.KonvaEventObject<PointerEvent>) => {
       if (!activeClipId || trackState.phase === 'running') return;
+      // The tools that dispatch no segmentation prompt (`select`/`pan`) instead
+      // arm a click-to-play gesture; the actual toggle happens on pointer-up if
+      // the pointer barely moved. Prompt tools never reach this branch, so their
+      // clicks are never swallowed.
+      if (tool === 'select' || tool === 'pan') {
+        clickStartRef.current = { x: evt.evt.clientX, y: evt.evt.clientY };
+        return;
+      }
       if (tool !== 'point-add' && tool !== 'point-remove' && tool !== 'box') return;
       const stage = evt.target.getStage();
       const pos = stage?.getPointerPosition();
@@ -402,13 +577,26 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
     [dragBox, stageToSource],
   );
 
-  const handlePointerUp = useCallback(() => {
-    if (!dragBox) return;
-    const box = dragBox;
-    setDragBox(null);
-    if (box.x1 === box.x2 && box.y1 === box.y2) return; // no drag distance — ignore
-    void dispatchBox({ x: box.x1, y: box.y1 }, { x: box.x2, y: box.y2 });
-  }, [dragBox, dispatchBox]);
+  const handlePointerUp = useCallback(
+    (evt?: Konva.KonvaEventObject<PointerEvent>) => {
+      // Click-to-play (select/pan): toggle only if the pointer barely traveled,
+      // so a pan-drag is not misread as a click.
+      if (clickStartRef.current) {
+        const start = clickStartRef.current;
+        clickStartRef.current = null;
+        const end = evt?.evt;
+        const moved = end ? Math.hypot(end.clientX - start.x, end.clientY - start.y) : 0;
+        if (moved < 4) setIsPlaying(!isPlaying);
+        return;
+      }
+      if (!dragBox) return;
+      const box = dragBox;
+      setDragBox(null);
+      if (box.x1 === box.x2 && box.y1 === box.y2) return; // no drag distance — ignore
+      void dispatchBox({ x: box.x1, y: box.y1 }, { x: box.x2, y: box.y2 });
+    },
+    [dragBox, dispatchBox, isPlaying, setIsPlaying],
+  );
 
   // -------------------------------------------------------------------
   // Prompt point markers for the selected object at the current frame.
@@ -444,17 +632,19 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
   return (
     <div
       ref={stageContainerRef}
-      className="relative flex h-full w-full min-h-0 min-w-0 items-center justify-center overflow-hidden bg-neutral-950"
+      className="group relative flex h-full w-full min-h-0 min-w-0 items-center justify-center overflow-hidden bg-neutral-950"
     >
       {/* Offscreen — the video element is only ever used as a Konva image
           source and as the shared playback clock; it is never displayed
-          directly (the Konva layer below is the visible frame). */}
+          directly (the Konva layer below is the visible frame). Volume/mute are
+          set imperatively (see the volume effect), not via a JSX attribute. */}
       {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-      <video ref={videoRef} muted playsInline style={{ display: 'none' }} />
+      <video ref={videoRef} playsInline style={{ display: 'none' }} />
 
       {!clip ? (
         <p className="text-sm text-neutral-500">Import and select a clip to start segmenting.</p>
       ) : displaySize.width > 0 && displaySize.height > 0 ? (
+        <>
         <Stage
           width={displaySize.width}
           height={displaySize.height}
@@ -513,6 +703,84 @@ export function PreviewCanvas({ videoRef, stageContainerRef }: PreviewCanvasProp
             {activeClipObjects.length === 0 && !dragBoxDisplay ? <Line points={[]} listening={false} /> : null}
           </Layer>
         </Stage>
+
+        {/* Playback overlay — a DOM sibling ABOVE the Stage (never inside the
+            Konva tree), docked over the bottom letterbox strip. Revealed on
+            hover/focus only; opacity-only transition within the §6 200ms budget.
+            White-alpha-on-neutral-950 chrome (no light-surface tokens, which
+            don't read over video — DESIGN.md §2). `pointer-events-none` while
+            hidden (and always while a prompt tool is armed) so the bar never
+            eats point/box prompt clicks landing over the bottom strip. */}
+        <div
+          className={cn(
+            'absolute inset-x-0 bottom-0 z-10 flex items-center gap-2 bg-neutral-950/75 px-3 py-2 opacity-0 transition-opacity',
+            promptToolActive
+              ? 'pointer-events-none'
+              : 'pointer-events-none group-hover:pointer-events-auto group-focus-within:pointer-events-auto group-hover:opacity-100 group-focus-within:opacity-100',
+          )}
+        >
+          <button
+            type="button"
+            aria-label={isPlaying ? 'Pause' : 'Play'}
+            onClick={() => setIsPlaying(!isPlaying)}
+            className="flex h-7 w-7 items-center justify-center rounded-md text-white/80 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/80 focus-visible:ring-offset-1 focus-visible:ring-offset-neutral-950"
+          >
+            {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+          </button>
+
+          <span className="min-w-[70px] text-[11px] tabular-nums text-white/70">
+            {formatTime(playhead, clip.fps)} · {playhead}f
+          </span>
+
+          <OverlaySlider
+            ariaLabel="Seek"
+            className="flex-1"
+            value={playhead}
+            min={0}
+            max={Math.max(0, clip.frameCount - 1)}
+            step={1}
+            bigStep={10}
+            ariaValueText={`${formatTime(playhead, clip.fps)} of ${formatTime(Math.max(0, clip.frameCount - 1), clip.fps)}`}
+            onScrubStart={() => setIsPlaying(false)}
+            onChange={(v) => setPlayhead(v)}
+          />
+
+          <button
+            type="button"
+            aria-label={muted ? 'Unmute' : 'Mute'}
+            onClick={() =>
+              setMuted((m) => {
+                const next = !m;
+                if (!next && volume === 0) {
+                  // Unmuting from a zero level: restore the pre-mute volume.
+                  setVolume(lastVolumeRef.current > 0 ? lastVolumeRef.current : 1);
+                }
+                return next;
+              })
+            }
+            className="flex h-7 w-7 items-center justify-center rounded-md text-white/80 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/80 focus-visible:ring-offset-1 focus-visible:ring-offset-neutral-950"
+          >
+            {muted || volume === 0 ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+          </button>
+
+          <OverlaySlider
+            ariaLabel="Volume"
+            className="w-16"
+            value={muted ? 0 : Math.round(volume * 100)}
+            min={0}
+            max={100}
+            step={5}
+            dimmed={muted}
+            ariaValueText={muted ? 'Muted' : `${Math.round(volume * 100)}%`}
+            onChange={(v) => {
+              const next = v / 100;
+              setVolume(next);
+              if (next > 0) lastVolumeRef.current = next;
+              setMuted(next === 0);
+            }}
+          />
+        </div>
+        </>
       ) : null}
     </div>
   );

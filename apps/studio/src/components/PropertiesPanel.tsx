@@ -61,75 +61,80 @@ function ClipProperties(): React.ReactElement | null {
 
   return (
     <section className="space-y-2 border-b border-border p-3">
-      <div className="flex items-center justify-between gap-2">
+      <div className="space-y-1">
         <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Clip</h3>
-        <div className="flex items-center gap-1">
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 shrink-0"
-            aria-label="Delete clip"
-            onClick={() => removeTimelineClip(timelineClip.id)}
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 shrink-0"
-            aria-label="Duplicate clip"
-            onClick={() => duplicateTimelineClip(timelineClip.id)}
-          >
-            <Copy className="h-3.5 w-3.5" />
-          </Button>
-          <span title={canSplit ? undefined : 'Move the playhead inside this clip to split'}>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7 shrink-0"
-              aria-label="Split clip at playhead"
-              title={canSplit ? 'Split clip at playhead' : undefined}
-              disabled={!canSplit}
-              onClick={() => splitTimelineClip(timelineClip.id, playhead)}
-            >
-              <Scissors className="h-3.5 w-3.5" />
-            </Button>
-          </span>
-        </div>
+        <p className="truncate text-sm font-medium" title={clip.fileName}>
+          {clip.fileName}
+        </p>
       </div>
-      <p className="truncate text-sm font-medium" title={clip.fileName}>
-        {clip.fileName}
-      </p>
-      <div className="flex items-center gap-2">
-        <label className="flex flex-1 flex-col gap-1 text-xs text-muted-foreground">
-          In frame
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+          <span>In frame</span>
+          <span>Out frame</span>
+        </div>
+        <div className="flex items-center overflow-hidden rounded-md border border-input">
           <input
             type="number"
+            aria-label="In frame"
             min={0}
             max={timelineClip.outFrame}
             value={timelineClip.inFrame}
             onChange={(e) =>
               trimTimelineClip(timelineClip.id, clampIn(Number(e.target.value)), timelineClip.outFrame)
             }
-            className="h-8 rounded-md border border-input bg-background px-2 text-sm text-foreground"
+            className="h-8 min-w-0 flex-1 bg-background px-2 text-sm tabular-nums text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
           />
-        </label>
-        <label className="flex flex-1 flex-col gap-1 text-xs text-muted-foreground">
-          Out frame
+          <span aria-hidden className="h-4 w-px shrink-0 bg-border" />
           <input
             type="number"
+            aria-label="Out frame"
             min={timelineClip.inFrame}
             max={maxFrame}
             value={timelineClip.outFrame}
             onChange={(e) =>
               trimTimelineClip(timelineClip.id, timelineClip.inFrame, clampOut(Number(e.target.value)))
             }
-            className="h-8 rounded-md border border-input bg-background px-2 text-sm text-foreground"
+            className="h-8 min-w-0 flex-1 bg-background px-2 text-sm tabular-nums text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
           />
-        </label>
+        </div>
+        <p className="text-[11px] tabular-nums text-muted-foreground">{clipSpan} frames</p>
+      </div>
+      <div className="flex items-center gap-1 pt-1">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 shrink-0"
+          aria-label="Duplicate clip"
+          onClick={() => duplicateTimelineClip(timelineClip.id)}
+        >
+          <Copy className="h-3.5 w-3.5" />
+        </Button>
+        <span title={canSplit ? undefined : 'Move the playhead inside this clip to split'}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0"
+            aria-label="Split clip at playhead"
+            title={canSplit ? 'Split clip at playhead' : undefined}
+            disabled={!canSplit}
+            onClick={() => splitTimelineClip(timelineClip.id, playhead)}
+          >
+            <Scissors className="h-3.5 w-3.5" />
+          </Button>
+        </span>
+        <span aria-hidden className="mx-0.5 h-4 w-px bg-border" />
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 shrink-0 hover:text-destructive"
+          aria-label="Delete clip"
+          onClick={() => removeTimelineClip(timelineClip.id)}
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
       </div>
     </section>
   );
@@ -144,13 +149,13 @@ function ObjectRow({ object, selected }: { object: TrackedObject; selected: bool
     <li
       className={cn(
         'flex items-center gap-2 rounded-md px-2 py-1.5 text-sm',
-        selected ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50',
+        selected ? 'bg-accent font-medium text-accent-foreground' : 'hover:bg-accent/50',
       )}
     >
       <button
         type="button"
         onClick={() => selectObject(selected ? null : object.objectId)}
-        className="flex flex-1 items-center gap-2 text-left"
+        className="flex flex-1 items-center gap-2 rounded-sm text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       >
         <span
           className="h-3 w-3 shrink-0 rounded-full border border-border"
@@ -163,7 +168,7 @@ function ObjectRow({ object, selected }: { object: TrackedObject; selected: bool
         type="button"
         variant="ghost"
         size="icon"
-        className="h-7 w-7 shrink-0"
+        className="h-7 w-7 shrink-0 hover:text-destructive"
         aria-label={`Remove ${object.label}`}
         onClick={() => removeObject(object.clipId, object.objectId)}
       >
@@ -188,7 +193,12 @@ function ObjectsProperties(): React.ReactElement | null {
 
   return (
     <section className="space-y-2 border-b border-border p-3">
-      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Objects</h3>
+      <div className="flex items-baseline justify-between">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Objects</h3>
+        {clipObjects.length > 0 ? (
+          <span className="text-[11px] tabular-nums text-muted-foreground">{clipObjects.length}</span>
+        ) : null}
+      </div>
       {clipObjects.length === 0 ? (
         <p className="text-sm text-muted-foreground">No objects yet — prompt one on the canvas.</p>
       ) : (
@@ -200,12 +210,13 @@ function ObjectsProperties(): React.ReactElement | null {
       )}
 
       {selectedObject ? (
-        <div className="space-y-1.5 pt-1">
-          <label className="flex items-center justify-between text-xs text-muted-foreground">
+        <div className="space-y-1.5 pt-2">
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
             <span>Mask opacity</span>
             <span>{Math.round(maskOpacity * 100)}%</span>
-          </label>
+          </div>
           <Slider
+            aria-label="Mask opacity"
             min={0}
             max={1}
             step={0.01}
@@ -240,7 +251,7 @@ function ExportProperties(): React.ReactElement | null {
           disabled={running}
           onClick={() => void exportMatte(activeClipId)}
         >
-          {running && exportState.kind === 'matte' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+          {running && exportState.kind === 'matte' ? <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" /> : null}
           Matte (PNG sequence)
         </Button>
         <Button
@@ -250,7 +261,7 @@ function ExportProperties(): React.ReactElement | null {
           disabled={running}
           onClick={() => void exportMp4Cutout(activeClipId)}
         >
-          {running && exportState.kind === 'mp4' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+          {running && exportState.kind === 'mp4' ? <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" /> : null}
           MP4 cutout (stretch)
         </Button>
       </div>
@@ -261,7 +272,7 @@ function ExportProperties(): React.ReactElement | null {
       ) : null}
       {exportState.phase === 'done' ? (
         <p className="text-xs text-muted-foreground">
-          Done: {exportState.fileName} ({exportState.framesExported} frames)
+          Done: <span className="text-foreground">{exportState.fileName}</span> ({exportState.framesExported} frames)
         </p>
       ) : null}
       {exportState.phase === 'error' ? (
@@ -272,18 +283,18 @@ function ExportProperties(): React.ReactElement | null {
 }
 
 /** Load-model panel: idle → CTA with size note; loading → progress; ready → device/quant/cached badge. */
-function ModelPanel(): React.ReactElement {
+function ModelPanel({ className }: { className?: string }): React.ReactElement {
   const modelStatus = useStudioStore((s) => s.modelStatus);
   const loadModel = useStudioStore((s) => s.loadModel);
 
   return (
-    <section className="space-y-2 p-3">
+    <section className={cn('space-y-2 p-3', className)}>
       <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Model</h3>
 
       {modelStatus.phase === 'idle' ? (
         <div className="space-y-2">
           <p className="text-xs text-muted-foreground">{MODEL_SIZE_NOTE}</p>
-          <Button type="button" size="sm" onClick={() => void loadModel()}>
+          <Button type="button" size="sm" className="w-full" onClick={() => void loadModel()}>
             Load model
           </Button>
         </div>
@@ -292,7 +303,7 @@ function ModelPanel(): React.ReactElement {
       {modelStatus.phase === 'loading' ? (
         <div className="space-y-1.5">
           <div className="flex items-center gap-2 text-sm">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
             <span>{modelStatus.progress?.phase ?? 'Loading…'}</span>
           </div>
           {modelStatus.progress?.file ? (
@@ -301,7 +312,7 @@ function ModelPanel(): React.ReactElement {
           {modelStatus.progress?.total ? (
             <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary">
               <div
-                className="h-full bg-primary transition-[width]"
+                className="h-full bg-primary transition-[width] duration-200 motion-reduce:transition-none"
                 style={{
                   width: `${Math.min(100, ((modelStatus.progress.loaded ?? 0) / modelStatus.progress.total) * 100)}%`,
                 }}
@@ -336,13 +347,15 @@ export function PropertiesPanel(): React.ReactElement {
   const hasSelection = useStudioStore(
     (s) => s.selection.timelineClipId !== null || s.selection.objectId !== null || s.activeClipId !== null,
   );
+  const modelReady = useStudioStore((s) => s.modelStatus.phase === 'ready');
 
   return (
     <div className="flex h-full flex-col overflow-y-auto bg-card text-card-foreground">
+      {!modelReady ? <ModelPanel className="border-b border-border" /> : null}
       {!hasSelection ? (
-        <div className="p-3">
+        <div className="space-y-2 border-b border-border p-3">
           <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Properties</h3>
-          <p className="mt-1 text-sm text-muted-foreground">Select a clip or object to see its properties.</p>
+          <p className="text-sm text-muted-foreground">Select a clip or object to see its properties.</p>
         </div>
       ) : (
         <>
@@ -351,7 +364,11 @@ export function PropertiesPanel(): React.ReactElement {
           <ExportProperties />
         </>
       )}
-      <ModelPanel />
+      {modelReady ? (
+        <div className="mt-auto border-t border-border">
+          <ModelPanel />
+        </div>
+      ) : null}
     </div>
   );
 }
