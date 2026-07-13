@@ -15,7 +15,7 @@ describe('float32ToFloat16Bits / float16BitsToFloat32 round trip', () => {
     expect(bits[1]).toBe(0x8000);
     expect(bits[2]).toBe(0x7c00);
     expect(bits[3]).toBe(0xfc00);
-    expect(bits[4] & 0x7c00).toBe(0x7c00); // NaN: exponent all-ones
+    expect(bits[4]! & 0x7c00).toBe(0x7c00); // NaN: exponent all-ones
 
     const back = float16BitsToFloat32(bits);
     expect(back[0]).toBe(0);

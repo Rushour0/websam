@@ -18,5 +18,33 @@
     "@changesets/cli": "^2.31.0",
     "publint": "^0.3.21",
     "typescript": "^5.9.3"
+  },
+  "pnpm": {
+    "packageExtensions": {
+      "lucide-react": {
+        "peerDependencies": { "@types/react": "*" },
+        "peerDependenciesMeta": { "@types/react": { "optional": true } }
+      },
+      "@dnd-kit/core": {
+        "peerDependencies": { "@types/react": "*" },
+        "peerDependenciesMeta": { "@types/react": { "optional": true } }
+      },
+      "@dnd-kit/sortable": {
+        "peerDependencies": { "@types/react": "*" },
+        "peerDependenciesMeta": { "@types/react": { "optional": true } }
+      },
+      "@dnd-kit/utilities": {
+        "peerDependencies": { "@types/react": "*" },
+        "peerDependenciesMeta": { "@types/react": { "optional": true } }
+      },
+      "react-resizable-panels": {
+        "peerDependencies": { "@types/react": "*" },
+        "peerDependenciesMeta": { "@types/react": { "optional": true } }
+      },
+      "react-konva": {
+        "peerDependencies": { "@types/react": "*" },
+        "peerDependenciesMeta": { "@types/react": { "optional": true } }
+      }
+    }
   }
 }
