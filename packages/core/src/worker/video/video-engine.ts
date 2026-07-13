@@ -49,6 +49,7 @@ import type { CoordinateTransform } from '../../coords.js';
 import { computeTransform, sourceToModel } from '../../coords.js';
 import { InvalidStateError, NotImplementedError } from '../../errors.js';
 import type { ModelSpec } from '../../registry.js';
+import { float16BitsToFloat32, float32ToFloat16Bits } from '../../runtime/float16.js';
 import type { Prompt } from '../../segmenter.js';
 import type { FrameSource } from '../../video/frame-source.js';
 import type { GraphManifestEntry, ModelManifest, TensorSpec } from '../../weights/manifest.js';
@@ -292,7 +293,11 @@ export class VideoEngine {
       } finally {
         conditioned.dispose();
       }
-      const logitsData = (await this.#backend.readback(decoded.maskLogits)) as Float32Array;
+      // maskLogits is 'float16' per the manifest; readback hands back raw
+      // half bits (Backend contract) that must be unpacked before postprocess math.
+      const logitsData = float16BitsToFloat32(
+        (await this.#backend.readback(decoded.maskLogits)) as Uint16Array,
+      );
       try {
         await this.#encodeAndCommit(obj, frameIndex, isCond, visionOut.visionFeatures, decoded);
       } finally {
@@ -320,9 +325,9 @@ export class VideoEngine {
     const chw = bitmapToTensor(frame, transform, this.#manifest.preprocess);
     const pixelsSpec = requireTensorSpec(this.#videoEncoderEntry.inputs, 'pixels', 'videoEncoder.inputs');
     const pixels = this.#backend.uploadTensor(
-      chw,
+      float32ToFloat16Bits(chw),
       [1, 3, this.#manifest.preprocess.inputSize, this.#manifest.preprocess.inputSize],
-      'float32',
+      'float16',
     );
     let out: Record<string, DeviceTensor>;
     try {
@@ -399,7 +404,11 @@ export class VideoEngine {
 
       const ptrSpec = requireTensorSpec(inputs, 'objectPointers', 'memoryAttention.inputs');
       const p = this.#video.maxObjectPointers;
-      const ptrTensor = this.#backend.uploadTensor(asm.objectPointers, [1, p, this.#video.embedDim], 'float32');
+      const ptrTensor = this.#backend.uploadTensor(
+        float32ToFloat16Bits(asm.objectPointers),
+        [1, p, this.#video.embedDim],
+        'float16',
+      );
       scratch.push(ptrTensor);
       feeds[ptrSpec.name] = ptrTensor;
 
@@ -452,13 +461,13 @@ export class VideoEngine {
       // so the leading batch dim can be baked into the zero allocation).
       const zeroSpatial = this.#backend.allocTensor(
         [1, M, tokensPerMemoryMap, memDim],
-        'float32',
+        'float16',
         'cpu',
       );
       scratch.push(zeroSpatial);
       const zeroSpatialPos = this.#backend.allocTensor(
         [1, M, tokensPerMemoryMap, memDim],
-        'float32',
+        'float16',
         'cpu',
       );
       scratch.push(zeroSpatialPos);
@@ -481,9 +490,9 @@ export class VideoEngine {
 
       const ptrSpec = requireTensorSpec(inputs, 'objectPointers', 'memoryAttention.inputs');
       const ptrTensor = this.#backend.uploadTensor(
-        new Float32Array(maxObjectPointers * embedDim),
+        new Uint16Array(maxObjectPointers * embedDim),
         [1, maxObjectPointers, embedDim],
-        'float32',
+        'float16',
       );
       scratch.push(ptrTensor);
       feeds[ptrSpec.name] = ptrTensor;
@@ -536,7 +545,11 @@ export class VideoEngine {
       feeds[hr1Spec.name] = highRes1;
 
       const pointsSpec = requireTensorSpec(inputs, 'points', 'maskDecoderVideo.inputs');
-      const points = this.#backend.uploadTensor(built.points, [1, 1, built.count, 2], 'float32');
+      const points = this.#backend.uploadTensor(
+        float32ToFloat16Bits(built.points),
+        [1, 1, built.count, 2],
+        'float16',
+      );
       scratch.push(points);
       feeds[pointsSpec.name] = points;
 
@@ -560,11 +573,15 @@ export class VideoEngine {
       const kept = new Set([maskLogits, iouScores, objectPointerT, objectScoreLogits]);
       for (const t of Object.values(out)) if (!kept.has(t)) t.dispose();
 
-      const iou = (await this.#backend.readback(iouScores)) as Float32Array;
+      // All maskDecoderVideo outputs are 'float16' per the manifest — unpack
+      // the raw half bits Backend.readback hands back before any numeric use.
+      const iou = float16BitsToFloat32((await this.#backend.readback(iouScores)) as Uint16Array);
       const score = iou.reduce((m, v) => Math.max(m, v), -Infinity);
-      const scoreLogits = (await this.#backend.readback(objectScoreLogits)) as Float32Array;
+      const scoreLogits = float16BitsToFloat32(
+        (await this.#backend.readback(objectScoreLogits)) as Uint16Array,
+      );
       const occluded = (scoreLogits[0] as number) < this.#video.occlusionThreshold;
-      const pointer = (await this.#backend.readback(objectPointerT)) as Float32Array;
+      const pointer = float16BitsToFloat32((await this.#backend.readback(objectPointerT)) as Uint16Array);
       iouScores.dispose();
       objectScoreLogits.dispose();
       objectPointerT.dispose();
@@ -591,12 +608,13 @@ export class VideoEngine {
     feeds[maskSpec.name] = decoded.maskLogits;
     // Prompted (conditioning) frames binarize the mask for memory; tracked
     // frames sigmoid it — the graph selects on this flag (FINDINGS.md §memory
-    // encoder). Uploaded float32 like the other host feeds (§4.3).
+    // encoder). The manifest declares this fp16, like every other video-graph
+    // tensor (§4.3), so the host float is packed to half bits before upload.
     const promptedSpec = requireTensorSpec(inputs, 'isPrompted', 'memoryEncoder.inputs');
     const promptedTensor = this.#backend.uploadTensor(
-      Float32Array.of(isCond ? 1 : 0),
+      float32ToFloat16Bits(Float32Array.of(isCond ? 1 : 0)),
       [1],
-      'float32',
+      'float16',
     );
     feeds[promptedSpec.name] = promptedTensor;
 
@@ -686,7 +704,9 @@ export class VideoEngine {
           } finally {
             conditioned.dispose();
           }
-          const logitsData = (await this.#backend.readback(result.maskLogits)) as Float32Array;
+          const logitsData = float16BitsToFloat32(
+            (await this.#backend.readback(result.maskLogits)) as Uint16Array,
+          );
           try {
             await this.#encodeAndCommit(obj, decoded.frameIndex, /* isCond */ false, visionOut.visionFeatures, result);
           } finally {

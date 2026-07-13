@@ -107,9 +107,12 @@ export class MemoryBank {
 
     const { maxCondFrames, numRecent, tokensPerMemoryMap, memDim } = this.#video;
     const maps = maxCondFrames + numRecent;
+    // Committed via `copyRegion` from `memoryEncoder`'s outputs, which the
+    // manifest declares `float16` like every other video-graph tensor —
+    // `copyRegion` hard-requires src/dst dtypes to match (backend.ts).
     const ringShape = [maps, tokensPerMemoryMap, memDim] as const;
-    this.#memorySpatial = init.backend.allocTensor(ringShape, 'float32', init.location);
-    this.#memorySpatialPos = init.backend.allocTensor(ringShape, 'float32', init.location);
+    this.#memorySpatial = init.backend.allocTensor(ringShape, 'float16', init.location);
+    this.#memorySpatialPos = init.backend.allocTensor(ringShape, 'float16', init.location);
 
     this.#slots = Array.from({ length: maps }, (_v, i): MemorySlotMeta => ({
       frameIdx: -1,

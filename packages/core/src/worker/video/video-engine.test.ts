@@ -286,31 +286,35 @@ function buildGraphs(
   backend: FakeBackend,
   video: VideoManifestSection,
 ): { graphs: VideoEngineGraphs; sessions: { videoEncoder: FakeSession; memoryAttention: FakeSession; maskDecoderVideo: FakeSession; memoryEncoder: FakeSession; noMemCondition: FakeSession } } {
+  // Output dtypes are 'float16' throughout, matching the real EdgeTAM video
+  // manifest (every video-graph tensor is fp16) — memoryFeatures/memoryPos in
+  // particular MUST match the MemoryBank ring's 'float16' alloc, since
+  // copyRegion hard-requires src/dst dtypes to be equal.
   const g = GRID;
   const videoEncoder = new FakeSession(backend, () => ({
-    visionFeatures: backend.makeOutputTensor([1, 1, g, g], 'float32', 'cpu'),
-    visionPos: backend.makeOutputTensor([1, 1, g, g], 'float32', 'cpu'),
-    highRes0: backend.makeOutputTensor([1, 1, g, g], 'float32', 'cpu'),
-    highRes1: backend.makeOutputTensor([1, 1, g, g], 'float32', 'cpu'),
+    visionFeatures: backend.makeOutputTensor([1, 1, g, g], 'float16', 'cpu'),
+    visionPos: backend.makeOutputTensor([1, 1, g, g], 'float16', 'cpu'),
+    highRes0: backend.makeOutputTensor([1, 1, g, g], 'float16', 'cpu'),
+    highRes1: backend.makeOutputTensor([1, 1, g, g], 'float16', 'cpu'),
   }));
   const memoryAttention = new FakeSession(backend, () => ({
-    conditionedFeatures: backend.makeOutputTensor([1, 1, g, g], 'float32', 'cpu'),
+    conditionedFeatures: backend.makeOutputTensor([1, 1, g, g], 'float16', 'cpu'),
   }));
   const maskDecoderVideo = new FakeSession(backend, () => ({
-    maskLogits: backend.makeOutputTensor([1, 1, g * 4, g * 4], 'float32', 'cpu'),
-    iouScores: backend.makeOutputTensor([1, 3], 'float32', 'cpu'),
-    objectPointer: backend.makeOutputTensor([1, video.embedDim], 'float32', 'cpu'),
+    maskLogits: backend.makeOutputTensor([1, 1, g * 4, g * 4], 'float16', 'cpu'),
+    iouScores: backend.makeOutputTensor([1, 3], 'float16', 'cpu'),
+    objectPointer: backend.makeOutputTensor([1, video.embedDim], 'float16', 'cpu'),
     // occlusion is driven by `occlusionThreshold` vs FakeBackend.readback's
     // constant-0 objectScoreLogits (see the dedicated occlusion test) — no
     // per-frame scripting needed here.
-    objectScoreLogits: backend.makeOutputTensor([1, 1], 'float32', 'cpu'),
+    objectScoreLogits: backend.makeOutputTensor([1, 1], 'float16', 'cpu'),
   }));
   const memoryEncoder = new FakeSession(backend, () => ({
-    memoryFeatures: backend.makeOutputTensor([video.tokensPerMemoryMap, video.memDim], 'float32', 'cpu'),
-    memoryPos: backend.makeOutputTensor([video.tokensPerMemoryMap, video.memDim], 'float32', 'cpu'),
+    memoryFeatures: backend.makeOutputTensor([video.tokensPerMemoryMap, video.memDim], 'float16', 'cpu'),
+    memoryPos: backend.makeOutputTensor([video.tokensPerMemoryMap, video.memDim], 'float16', 'cpu'),
   }));
   const noMemCondition = new FakeSession(backend, () => ({
-    conditionedFeatures: backend.makeOutputTensor([1, 1, g, g], 'float32', 'cpu'),
+    conditionedFeatures: backend.makeOutputTensor([1, 1, g, g], 'float16', 'cpu'),
   }));
   return {
     graphs: { videoEncoder, memoryAttention, maskDecoderVideo, memoryEncoder, noMemCondition },

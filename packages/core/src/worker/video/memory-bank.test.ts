@@ -142,10 +142,17 @@ function makeBank(backend: FakeBackend, overrides?: Partial<VideoManifestSection
   return new MemoryBank({ backend, video: v, strategy: strategyFor('edgetam', v), location: 'device' });
 }
 
-/** Sentinel feature/pos tensors filled with `value` so slot writes are checkable. */
+/**
+ * Sentinel feature/pos tensors filled with `value` so slot writes are
+ * checkable. Tagged `'float16'` — the ring `MemoryBank` allocates is
+ * `'float16'` (the real memoryEncoder outputs it commits are), and
+ * `copyRegion` requires src/dst dtypes to match; the fake backend's `data`
+ * stays a plain `Float32Array` regardless since this harness never encodes
+ * real half-float bits.
+ */
 function feat(backend: FakeBackend, value: number, shape: readonly number[] = [T, MEM_DIM]): DeviceTensor {
   const data = new Float32Array(elemCount(shape)).fill(value);
-  return backend.uploadTensor(data, shape, 'float32');
+  return backend.uploadTensor(data, shape, 'float16');
 }
 
 function pointerVec(value: number): Float32Array {
