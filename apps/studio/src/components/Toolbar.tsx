@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 
 import { Button } from './ui/button.js';
+import { ModelPicker } from './ModelPicker.js';
 import { ToggleGroup, ToggleGroupItem } from './ui/toggle-group.js';
 import { cn } from '../lib/utils.js';
 import { useStudioStore } from '../store/studio-store.js';
@@ -197,6 +198,7 @@ export function Toolbar(): React.JSX.Element {
       <div className="mx-1 h-6 w-px bg-border" />
 
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <ModelPicker />
         <span
           className="flex items-center gap-1.5 rounded-full border border-input px-2.5 py-1"
           role="status"

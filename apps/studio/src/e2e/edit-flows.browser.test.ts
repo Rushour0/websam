@@ -145,7 +145,7 @@ beforeAll(async () => {
   sharedMeta = await fetchJson<GoldenVideoMeta>(new URL('golden-video-meta.json', fixturesBaseUrl));
 
   let lastPhase = '';
-  sharedSegmenter = await loadSegmenter((event) => {
+  sharedSegmenter = await loadSegmenter('edgetam', (event) => {
     if (event.phase !== lastPhase) {
       lastPhase = event.phase;
       console.log(`[edit-flows] load: ${event.phase}${event.file ? ` ${event.file}` : ''}`);

@@ -17,8 +17,10 @@
  */
 import { create } from 'zustand';
 import { subscribeWithSelector } from 'zustand/middleware';
-import type { LoadProgressEvent, MaskResult, Prompt } from '@websam3/core';
+import type { LoadProgressEvent, MaskResult, ModelSpec, Prompt } from '@websam3/core';
+import { getModel } from '@websam3/core';
 import type { MaskTimeline } from '@websam3/video-editing';
+import { acceptLicense as persistLicenseAcceptance, isLicenseAccepted } from '../lib/license-store.js';
 
 // ---------------------------------------------------------------------------
 // Segmentation integration seam (owned by other wave files under
@@ -160,6 +162,13 @@ export interface StudioState {
   // segmenter lifecycle
   modelStatus: ModelStatus;
   resolvedDevice: 'webgpu' | 'wasm' | null;
+  /** Currently selected model tier id (registry id, e.g. 'edgetam', 'sam3-tracker'). */
+  selectedModelId: string;
+  /**
+   * Set while a license-gated tier is picked but not yet consented to — drives the consent dialog's
+   * visibility. null when no consent prompt is pending.
+   */
+  pendingLicenseModelId: string | null;
   trackState: TrackState;
   exportState: ExportState;
   notice: { title: string; detail: string; kind: 'error' | 'warn' } | null;
@@ -195,6 +204,9 @@ export interface StudioState {
   setMaskOpacity: (opacity: number) => void;
 
   loadModel: () => Promise<void>;
+  selectModel: (modelId: string) => void;
+  confirmPendingLicense: () => void;
+  cancelPendingLicense: () => void;
 
   activateClip: (clipId: string) => Promise<void>;
   addPromptObject: (clipId: string, frameIndex: number, prompts: Prompt[]) => Promise<void>;
@@ -294,6 +306,8 @@ export const useStudioStore = create<StudioState>()(
 
     modelStatus: { phase: 'idle' },
     resolvedDevice: null,
+    selectedModelId: 'edgetam',
+    pendingLicenseModelId: null,
     trackState: { phase: 'idle' },
     exportState: { phase: 'idle' },
     notice: null,
@@ -638,13 +652,40 @@ export const useStudioStore = create<StudioState>()(
     // ---------------------------------------------------------------------
     // segmenter lifecycle
     // ---------------------------------------------------------------------
+    selectModel: (modelId: string) => {
+      const state = get();
+      if (modelId === state.selectedModelId && state.modelStatus.phase !== 'idle') return; // already selected/loading/loaded
+      const spec: ModelSpec | undefined = getModel(modelId);
+      if (!spec) {
+        set({ notice: { title: 'Unknown model', detail: `No registered model tier '${modelId}'.`, kind: 'error' } });
+        return;
+      }
+      if (spec.requiresLicenseAcceptance && !isLicenseAccepted('sam')) {
+        set({ pendingLicenseModelId: modelId });
+        return;
+      }
+      set({ selectedModelId: modelId, modelStatus: { phase: 'idle' }, resolvedDevice: null });
+      void get().loadModel();
+    },
+
+    confirmPendingLicense: () => {
+      const modelId = get().pendingLicenseModelId;
+      if (!modelId) return;
+      persistLicenseAcceptance('sam');
+      set({ pendingLicenseModelId: null, selectedModelId: modelId, modelStatus: { phase: 'idle' }, resolvedDevice: null });
+      void get().loadModel();
+    },
+
+    cancelPendingLicense: () => set({ pendingLicenseModelId: null }),
+
     loadModel: async () => {
       const status = get().modelStatus;
       if (status.phase === 'loading' || status.phase === 'ready') return;
+      const modelId = get().selectedModelId;
 
       set({ modelStatus: { phase: 'loading' } });
       try {
-        const segmenter = await loadSegmenter((event: LoadProgressEvent) => {
+        const segmenter = await loadSegmenter(modelId, (event: LoadProgressEvent) => {
           set({
             modelStatus: {
               phase: 'loading',

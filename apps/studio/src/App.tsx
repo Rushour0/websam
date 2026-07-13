@@ -30,6 +30,7 @@ import { PropertiesPanel } from './components/PropertiesPanel.js';
 import { ChatPanel } from './components/ChatPanel.js';
 import { Timeline } from './components/Timeline.js';
 import { AudioPlayback } from './components/AudioPlayback.js';
+import { LicenseConsentDialog } from './components/LicenseConsentDialog.js';
 import { disposeAllClips } from './segmentation/session-manager.js';
 import { disposeSegmenter } from './segmentation/segmenter-lifecycle.js';
 
@@ -296,6 +297,7 @@ export function App(): JSX.Element {
         </DndContext>
         <AudioPlayback />
         <NoticeToast />
+        <LicenseConsentDialog />
       </div>
     </ErrorBoundary>
   );

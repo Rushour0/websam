@@ -145,7 +145,7 @@ describe('studio segmentation seam (real src/segmentation/* vs HF EdgeTamVideoMo
       const meta = await fetchJson<GoldenVideoMeta>(new URL('golden-video-meta.json', fixturesBaseUrl));
 
       let lastPhase = '';
-      const segmenter = await loadSegmenter((event) => {
+      const segmenter = await loadSegmenter('edgetam', (event) => {
         if (event.phase !== lastPhase) {
           lastPhase = event.phase;
           console.log(`[studio-segmentation] load: ${event.phase}${event.file ? ` ${event.file}` : ''}`);
