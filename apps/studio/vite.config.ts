@@ -31,6 +31,11 @@ export default defineConfig({
     format: 'es',
   },
   server: {
+    // Pinned: OPFS/Cache API model-weight storage is origin-scoped, so a
+    // silent port hop (Vite's default when 5173 is taken) turns into a fresh,
+    // empty origin and re-downloads the model on every reload.
+    port: 5173,
+    strictPort: true,
     headers: crossOriginIsolationHeaders,
     fs: {
       allow: [repoRoot],
